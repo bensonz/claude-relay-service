@@ -9,6 +9,8 @@ const logger = require('../utils/logger')
 const { authenticateApiKey } = require('../middleware/auth')
 const claudeRelayService = require('../services/relay/claudeRelayService')
 const claudeConsoleRelayService = require('../services/relay/claudeConsoleRelayService')
+const bedrockRelayService = require('../services/relay/bedrockRelayService')
+const bedrockAccountService = require('../services/account/bedrockAccountService')
 const openaiToClaude = require('../services/openaiToClaude')
 const apiKeyService = require('../services/apiKeyService')
 const unifiedClaudeScheduler = require('../services/scheduler/unifiedClaudeScheduler')
@@ -321,7 +323,24 @@ async function handleChatCompletion(req, res, apiKeyData) {
         openaiToClaude.convertStreamChunk(chunk, req.body.model, sessionId)
 
       // 根据账户类型选择转发服务
-      if (accountType === 'claude-console') {
+      if (accountType === 'bedrock') {
+        // Bedrock 账户使用 Bedrock 转发服务
+        const bedrockAccountResult = await bedrockAccountService.getAccount(accountId)
+        if (!bedrockAccountResult.success) {
+          throw new Error('Failed to get Bedrock account details')
+        }
+
+        const result = await bedrockRelayService.handleStreamRequest(
+          claudeRequest,
+          bedrockAccountResult.data,
+          res
+        )
+
+        // 记录 Bedrock 使用统计
+        if (result && result.usage) {
+          usageCallback(result.usage)
+        }
+      } else if (accountType === 'claude-console') {
         // Claude Console 账户使用 Console 转发服务
         await claudeConsoleRelayService.relayStreamRequestWithUsageCapture(
           claudeRequest,
@@ -353,7 +372,26 @@ async function handleChatCompletion(req, res, apiKeyData) {
 
       // 根据账户类型选择转发服务
       let claudeResponse
-      if (accountType === 'claude-console') {
+      if (accountType === 'bedrock') {
+        // Bedrock 账户使用 Bedrock 转发服务
+        const bedrockAccountResult = await bedrockAccountService.getAccount(accountId)
+        if (!bedrockAccountResult.success) {
+          throw new Error('Failed to get Bedrock account details')
+        }
+
+        const result = await bedrockRelayService.handleNonStreamRequest(
+          claudeRequest,
+          bedrockAccountResult.data
+        )
+
+        // 构建与其他分支一致的响应格式
+        claudeResponse = {
+          statusCode: result.success ? 200 : 500,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(result.success ? result.data : { error: result.error }),
+          accountId
+        }
+      } else if (accountType === 'claude-console') {
         // Claude Console 账户使用 Console 转发服务
         claudeResponse = await claudeConsoleRelayService.relayRequest(
           claudeRequest,
