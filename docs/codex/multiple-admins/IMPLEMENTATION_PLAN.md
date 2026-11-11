@@ -25,3 +25,10 @@
 **Success Criteria**: Relevant tests pass; the fork includes the VM's current revision and its own Bedrock change; no VM restart or live account changes occur.
 **Tests**: Jest, relevant lint/format checks, frontend production build, browser checks, diff review, and ancestry check before push.
 **Status**: In Progress
+
+## Stage 5: Deployment and requested account
+
+**Goal**: Deploy the tested fork on the VM and create the requested `melson` admin.
+**Success Criteria**: Detached update finishes without depending on the relay session; health and both original/new admin logins pass. Credentials stay outside Git and deployment logs.
+**Tests**: VM health, original login, new login, profile identity, and protected admin API access.
+**Status**: Not Started

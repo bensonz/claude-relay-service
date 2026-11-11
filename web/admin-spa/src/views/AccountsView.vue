@@ -356,7 +356,7 @@
                               OpenAI
                             </div>
                             <div class="text-gray-200 dark:text-gray-600">
-                              进度条分别展示 5h 与周限窗口的额度使用比例，颜色含义与上方保持一致。
+                              进度条展示上游实际回传的额度窗口，标签按窗口长度自动生成，颜色含义与上方保持一致。
                             </div>
                             <div class="space-y-1 text-gray-200 dark:text-gray-600">
                               <div class="flex items-start gap-2">
@@ -372,6 +372,13 @@
                                 >
                               </div>
                               <div class="flex items-start gap-2">
+                                <i class="fas fa-user-tag mt-[2px] text-[10px] text-amber-500"></i>
+                                <span class="font-medium text-white dark:text-gray-900"
+                                  >窗口数量随套餐而定：Pro 账号只有周限窗口，此时不会再显示 5h
+                                  进度条。</span
+                                >
+                              </div>
+                              <div class="flex items-start gap-2">
                                 <i
                                   class="fas fa-info-circle mt-[2px] text-[10px] text-indigo-500"
                                 ></i>
@@ -384,10 +391,35 @@
                           <div class="h-px bg-gray-200 dark:bg-gray-600/50"></div>
                           <div class="space-y-2">
                             <div class="text-sm font-semibold text-white dark:text-gray-900">
+                              Grok
+                            </div>
+                            <div class="text-gray-200 dark:text-gray-600">
+                              OAuth 订阅显示 xAI 配额窗口（tokens / requests）和套餐名（如 SuperGrok
+                              Heavy）。自定义中转没有官方会话额度，下面的 5h / 1d / 7d / 30d 是 CRS
+                              本地滚动用量。
+                            </div>
+                            <div class="space-y-1 text-gray-200 dark:text-gray-600">
+                              <div class="flex items-start gap-2">
+                                <i class="fas fa-clock mt-[2px] text-[10px] text-indigo-500"></i>
+                                <span class="font-medium text-white dark:text-gray-900"
+                                  >5h / 1d：按小时桶汇总，费用来自 model_pricing.json。</span
+                                >
+                              </div>
+                              <div class="flex items-start gap-2">
+                                <i class="fas fa-history mt-[2px] text-[10px] text-emerald-500"></i>
+                                <span class="font-medium text-white dark:text-gray-900"
+                                  >7d / 30d：按天桶汇总，覆盖最近一周和一个月。</span
+                                >
+                              </div>
+                            </div>
+                          </div>
+                          <div class="h-px bg-gray-200 dark:bg-gray-600/50"></div>
+                          <div class="space-y-2">
+                            <div class="text-sm font-semibold text-white dark:text-gray-900">
                               Claude OAuth 账户
                             </div>
                             <div class="text-gray-200 dark:text-gray-600">
-                              展示三个窗口的使用率（utilization百分比），颜色含义同上。
+                              展示上游实际回传的窗口使用率（utilization百分比），模型窗口有几个就显示几条，颜色含义同上。
                             </div>
                             <div class="space-y-1 text-gray-200 dark:text-gray-600">
                               <div class="flex items-start gap-2">
@@ -407,7 +439,9 @@
                               <div class="flex items-start gap-2">
                                 <i class="fas fa-gem mt-[2px] text-[10px] text-purple-500"></i>
                                 <span class="font-medium text-white dark:text-gray-900"
-                                  >Sonnet窗口：7天Sonnet模型专用限额。</span
+                                  >模型窗口：上游按模型限定的 7 天专用限额（如
+                                  Fable），标签取自上游返回的模型名；上游只给了顶层 Sonnet
+                                  窗口时显示为 Sonnet，两者都没有则不显示。</span
                                 >
                               </div>
                               <div class="flex items-start gap-2">
@@ -649,6 +683,25 @@
                       >
                     </div>
                     <div
+                      v-else-if="account.platform === 'grok'"
+                      class="flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-gradient-to-r from-zinc-100 to-neutral-100 px-2.5 py-1 dark:border-zinc-700 dark:from-zinc-900/30 dark:to-neutral-900/30"
+                    >
+                      <i class="fas fa-bolt text-xs text-zinc-800 dark:text-zinc-300" />
+                      <span class="text-xs font-semibold text-zinc-800 dark:text-zinc-200"
+                        >Grok</span
+                      >
+                      <span class="mx-1 h-4 w-px bg-zinc-300 dark:bg-zinc-600" />
+                      <span class="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                        {{
+                          account.authType === 'api_key'
+                            ? account.customUpstream
+                              ? '自定义中转'
+                              : '官方 API'
+                            : 'OAuth'
+                        }}
+                      </span>
+                    </div>
+                    <div
                       v-else-if="account.platform === 'droid'"
                       class="flex items-center gap-1.5 rounded-lg border border-cyan-200 bg-gradient-to-r from-cyan-100 to-sky-100 px-2.5 py-1 dark:border-cyan-700 dark:from-cyan-900/20 dark:to-sky-900/20"
                     >
@@ -756,11 +809,23 @@
                     >
                       <i class="fas fa-clock mr-1" />
                       临时暂停
-                      <span v-if="account.tempUnavailable.ttl > 0"
-                        >({{ formatTempUnavailableTime(account.tempUnavailable.ttl) }})</span
-                      >
+                      <span v-if="getTempUnavailableRemainingSeconds(account.tempUnavailable) > 0">
+                        ({{
+                          formatTempUnavailableTime(
+                            getTempUnavailableRemainingSeconds(account.tempUnavailable)
+                          )
+                        }}
+                        <span v-if="getTempUnavailableCooldownSeconds(account.tempUnavailable) > 0"
+                          >/
+                          {{
+                            formatTempUnavailableTime(
+                              getTempUnavailableCooldownSeconds(account.tempUnavailable)
+                            )
+                          }}</span
+                        >)
+                      </span>
                       <el-tooltip
-                        :content="`${account.tempUnavailable.errorType} (HTTP ${account.tempUnavailable.statusCode})`"
+                        :content="getTempUnavailableTooltipContent(account.tempUnavailable)"
                         effect="dark"
                         placement="top"
                       >
@@ -783,11 +848,29 @@
                       </el-tooltip>
                     </span>
                     <span
+                      v-for="family in getLimitedModelFamilies(account)"
+                      :key="family.key"
+                      class="inline-flex items-center rounded-full bg-purple-100 px-3 py-1 text-xs font-semibold text-purple-800 dark:bg-purple-500/20 dark:text-purple-300"
+                    >
+                      <i class="fas fa-hourglass-half mr-1" />
+                      {{ family.label }}限流
+                      <span v-if="family.minutesRemaining > 0">
+                        ({{ formatRateLimitTime(family.minutesRemaining) }})
+                      </span>
+                    </span>
+                    <span
                       v-if="account.status === 'blocked' && account.errorMessage"
                       class="mt-1 max-w-xs truncate text-xs text-gray-500 dark:text-gray-400"
                       :title="account.errorMessage"
                     >
                       {{ account.errorMessage }}
+                    </span>
+                    <span
+                      v-if="isAccountRoutingBlocked(account)"
+                      class="mt-1 block max-w-xl truncate text-xs font-medium text-red-600 dark:text-red-300"
+                      :title="`不可路由：${getRoutingBlockReasonSummary(account)}`"
+                    >
+                      不可路由：{{ getRoutingBlockReasonSummary(account) }}
                     </span>
                     <span
                       v-if="account.accountType === 'dedicated'"
@@ -921,13 +1004,53 @@
                           重置剩余 {{ formatClaudeRemaining(account.claudeUsage.sevenDay) }}
                         </div>
                       </div>
-                      <!-- 7天Opus窗口 -->
-                      <div class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70">
+                      <!-- 按模型限定的周窗口（上游 limits[] 中的 weekly_scoped，如 Fable） -->
+                      <div
+                        v-for="(scoped, scopedIndex) in getScopedModelUsage(account)"
+                        :key="`${scoped.modelName}-${scopedIndex}`"
+                        class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70"
+                      >
                         <div class="flex items-center gap-2">
                           <span
                             class="inline-flex min-w-[32px] justify-center rounded-full bg-purple-100 px-2 py-0.5 text-[11px] font-medium text-purple-600 dark:bg-purple-500/20 dark:text-purple-300"
                           >
-                            sonnet
+                            {{ scoped.modelName }}
+                          </span>
+                          <div class="flex-1">
+                            <div class="flex items-center gap-2">
+                              <div class="h-2 flex-1 rounded-full bg-gray-200 dark:bg-gray-600">
+                                <div
+                                  :class="[
+                                    'h-2 rounded-full transition-all duration-300',
+                                    getClaudeUsageBarClass(scoped)
+                                  ]"
+                                  :style="{ width: getClaudeUsageWidth(scoped) }"
+                                />
+                              </div>
+                              <span
+                                class="w-12 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
+                              >
+                                {{ formatClaudeUsagePercent(scoped) }}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                          重置剩余 {{ formatClaudeRemaining(scoped) }}
+                        </div>
+                      </div>
+                      <!-- 顶层具名窗口（seven_day_sonnet）。对 Max 账号它一直是 null，
+                           模型级额度都在 limits[] 里；但只要它确实有数据就要画出来，
+                           哪怕 limits[] 同时也回传了 weekly_scoped 条目。 -->
+                      <div
+                        v-if="hasLegacySevenDayModelWindow(account)"
+                        class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70"
+                      >
+                        <div class="flex items-center gap-2">
+                          <span
+                            class="inline-flex min-w-[32px] justify-center rounded-full bg-purple-100 px-2 py-0.5 text-[11px] font-medium text-purple-600 dark:bg-purple-500/20 dark:text-purple-300"
+                          >
+                            {{ LEGACY_SEVEN_DAY_MODEL_LABEL }}
                           </span>
                           <div class="flex-1">
                             <div class="flex items-center gap-2">
@@ -1110,13 +1233,16 @@
                     </div>
                   </div>
                   <div v-else-if="account.platform === 'openai'" class="space-y-2">
-                    <div v-if="account.codexUsage" class="space-y-2">
-                      <div class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70">
+                    <div v-if="hasAnyCodexWindow(account.codexUsage)" class="space-y-2">
+                      <div
+                        v-if="hasCodexWindow(account.codexUsage.primary)"
+                        class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70"
+                      >
                         <div class="flex items-center gap-2">
                           <span
                             class="inline-flex min-w-[32px] justify-center rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300"
                           >
-                            {{ getCodexWindowLabel('primary') }}
+                            {{ getCodexWindowLabel(account.codexUsage.primary, 'primary') }}
                           </span>
                           <div class="flex-1">
                             <div class="flex items-center gap-2">
@@ -1143,12 +1269,15 @@
                           重置剩余 {{ formatCodexRemaining(account.codexUsage.primary) }}
                         </div>
                       </div>
-                      <div class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70">
+                      <div
+                        v-if="hasCodexWindow(account.codexUsage.secondary)"
+                        class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70"
+                      >
                         <div class="flex items-center gap-2">
                           <span
                             class="inline-flex min-w-[32px] justify-center rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-medium text-blue-600 dark:bg-blue-500/20 dark:text-blue-300"
                           >
-                            {{ getCodexWindowLabel('secondary') }}
+                            {{ getCodexWindowLabel(account.codexUsage.secondary, 'secondary') }}
                           </span>
                           <div class="flex-1">
                             <div class="flex items-center gap-2">
@@ -1180,6 +1309,92 @@
                       <span class="text-xs">N/A</span>
                     </div>
                   </div>
+                  <div v-else-if="account.platform === 'grok'" class="space-y-1.5">
+                    <div
+                      v-if="account.authType === 'oauth' && account.grokUsage"
+                      class="space-y-1.5"
+                    >
+                      <div class="text-[11px] font-medium text-zinc-700 dark:text-zinc-200">
+                        {{ account.grokUsage.planLabel || 'Grok OAuth' }}
+                        <span
+                          v-if="!account.grokUsage.headersObserved"
+                          class="ml-1 font-normal text-gray-400"
+                          >（配额需一次成功请求后显示）</span
+                        >
+                      </div>
+                      <div
+                        v-for="window in grokQuotaWindows(account)"
+                        :key="window.key"
+                        class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70"
+                      >
+                        <div class="flex items-center gap-2">
+                          <span
+                            class="inline-flex min-w-[32px] justify-center rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300"
+                          >
+                            {{ window.label }}
+                          </span>
+                          <div class="flex-1">
+                            <div class="flex items-center gap-2">
+                              <div class="h-2 flex-1 rounded-full bg-gray-200 dark:bg-gray-600">
+                                <div
+                                  :class="[
+                                    'h-2 rounded-full transition-all duration-300',
+                                    getClaudeUsageBarClass(window)
+                                  ]"
+                                  :style="{ width: getClaudeUsageWidth(window) }"
+                                />
+                              </div>
+                              <span
+                                class="w-12 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
+                              >
+                                {{ formatClaudeUsagePercent(window) }}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                          <span v-if="window.used !== null && window.limit">
+                            {{ formatNumber(window.used) }} / {{ formatNumber(window.limit) }}
+                          </span>
+                          <span v-if="window.remainingSeconds !== null" class="ml-1">
+                            重置剩余 {{ formatClaudeRemaining(window) }}
+                          </span>
+                          <span v-if="window.used === null && !window.limit">等待上游配额头</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="space-y-1 rounded-lg bg-gray-50 px-2 py-1.5 dark:bg-gray-700/70">
+                      <div
+                        v-for="window in grokRollingWindows"
+                        :key="window.key"
+                        class="flex items-center gap-1.5"
+                        :title="formatGrokRollingTooltip(account.rollingUsage?.[window.key])"
+                      >
+                        <span
+                          class="w-6 shrink-0 text-[10px] font-semibold text-zinc-500 dark:text-zinc-300"
+                          >{{ window.label }}</span
+                        >
+                        <div
+                          class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-600"
+                        >
+                          <div
+                            class="h-full rounded-full bg-gradient-to-r from-zinc-500 to-indigo-500 transition-all duration-300"
+                            :style="{
+                              width: grokRollingBarWidth(
+                                account.rollingUsage?.[window.key],
+                                grokRollingMaxCost(account.rollingUsage)
+                              )
+                            }"
+                          />
+                        </div>
+                        <span
+                          class="w-[52px] shrink-0 text-right text-[10px] font-semibold tabular-nums text-gray-800 dark:text-gray-100"
+                        >
+                          ${{ formatCost(account.rollingUsage?.[window.key]?.cost || 0) }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
                   <div v-else class="text-sm text-gray-400">
                     <span class="text-xs">N/A</span>
                   </div>
@@ -1199,6 +1414,7 @@
                       account.platform === 'azure_openai' ||
                       account.platform === 'ccr' ||
                       account.platform === 'droid' ||
+                      account.platform === 'grok' ||
                       account.platform === 'gemini-api'
                     "
                     class="flex items-center gap-2"
@@ -1316,6 +1532,14 @@
                       <span class="ml-1">详情</span>
                     </button>
                     <button
+                      class="rounded bg-red-100 px-2.5 py-1 text-xs font-medium text-red-700 transition-colors hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300 dark:hover:bg-red-800/50"
+                      title="查看错误历史"
+                      @click="openErrorHistory(account)"
+                    >
+                      <i class="fas fa-exclamation-triangle" />
+                      <span class="ml-1">错误</span>
+                    </button>
+                    <button
                       v-if="canTestAccount(account)"
                       class="rounded bg-cyan-100 px-2.5 py-1 text-xs font-medium text-cyan-700 transition-colors hover:bg-cyan-200 dark:bg-cyan-900/40 dark:text-cyan-300 dark:hover:bg-cyan-800/50"
                       title="测试账户连通性"
@@ -1418,7 +1642,9 @@
                             ? 'bg-gradient-to-br from-teal-500 to-emerald-600'
                             : account.platform === 'droid'
                               ? 'bg-gradient-to-br from-cyan-500 to-sky-600'
-                              : 'bg-gradient-to-br from-blue-500 to-blue-600'
+                              : account.platform === 'grok'
+                                ? 'bg-gradient-to-br from-zinc-700 to-black'
+                                : 'bg-gradient-to-br from-blue-500 to-blue-600'
                 ]"
               >
                 <i
@@ -1436,7 +1662,9 @@
                               ? 'fas fa-code-branch'
                               : account.platform === 'droid'
                                 ? 'fas fa-robot'
-                                : 'fas fa-robot'
+                                : account.platform === 'grok'
+                                  ? 'fas fa-bolt'
+                                  : 'fas fa-robot'
                   ]"
                 />
               </div>
@@ -1613,13 +1841,53 @@
                     重置剩余 {{ formatClaudeRemaining(account.claudeUsage.sevenDay) }}
                   </div>
                 </div>
-                <!-- 7天Opus窗口 -->
-                <div class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70">
+                <!-- 按模型限定的周窗口（上游 limits[] 中的 weekly_scoped，如 Fable） -->
+                <div
+                  v-for="(scoped, scopedIndex) in getScopedModelUsage(account)"
+                  :key="`${scoped.modelName}-${scopedIndex}`"
+                  class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70"
+                >
                   <div class="flex items-center gap-2">
                     <span
                       class="inline-flex min-w-[32px] justify-center rounded-full bg-purple-100 px-2 py-0.5 text-[11px] font-medium text-purple-600 dark:bg-purple-500/20 dark:text-purple-300"
                     >
-                      Opus
+                      {{ scoped.modelName }}
+                    </span>
+                    <div class="flex-1">
+                      <div class="flex items-center gap-2">
+                        <div class="h-2 flex-1 rounded-full bg-gray-200 dark:bg-gray-600">
+                          <div
+                            :class="[
+                              'h-2 rounded-full transition-all duration-300',
+                              getClaudeUsageBarClass(scoped)
+                            ]"
+                            :style="{ width: getClaudeUsageWidth(scoped) }"
+                          />
+                        </div>
+                        <span
+                          class="w-12 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
+                        >
+                          {{ formatClaudeUsagePercent(scoped) }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                    重置剩余 {{ formatClaudeRemaining(scoped) }}
+                  </div>
+                </div>
+                <!-- 顶层具名窗口（seven_day_sonnet）。对 Max 账号它一直是 null，
+                     模型级额度都在 limits[] 里；但只要它确实有数据就要画出来，
+                     哪怕 limits[] 同时也回传了 weekly_scoped 条目。 -->
+                <div
+                  v-if="hasLegacySevenDayModelWindow(account)"
+                  class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70"
+                >
+                  <div class="flex items-center gap-2">
+                    <span
+                      class="inline-flex min-w-[32px] justify-center rounded-full bg-purple-100 px-2 py-0.5 text-[11px] font-medium text-purple-600 dark:bg-purple-500/20 dark:text-purple-300"
+                    >
+                      {{ LEGACY_SEVEN_DAY_MODEL_LABEL }}
                     </span>
                     <div class="flex-1">
                       <div class="flex items-center gap-2">
@@ -1702,13 +1970,16 @@
               <div v-else class="text-xs text-gray-400">暂无统计</div>
             </div>
             <div v-else-if="account.platform === 'openai'" class="space-y-2">
-              <div v-if="account.codexUsage" class="space-y-2">
-                <div class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700">
+              <div v-if="hasAnyCodexWindow(account.codexUsage)" class="space-y-2">
+                <div
+                  v-if="hasCodexWindow(account.codexUsage.primary)"
+                  class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700"
+                >
                   <div class="flex items-center gap-2">
                     <span
                       class="inline-flex min-w-[32px] justify-center rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300"
                     >
-                      {{ getCodexWindowLabel('primary') }}
+                      {{ getCodexWindowLabel(account.codexUsage.primary, 'primary') }}
                     </span>
                     <div class="flex-1">
                       <div class="flex items-center gap-2">
@@ -1735,12 +2006,15 @@
                     重置剩余 {{ formatCodexRemaining(account.codexUsage.primary) }}
                   </div>
                 </div>
-                <div class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700">
+                <div
+                  v-if="hasCodexWindow(account.codexUsage.secondary)"
+                  class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700"
+                >
                   <div class="flex items-center gap-2">
                     <span
                       class="inline-flex min-w-[32px] justify-center rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-medium text-blue-600 dark:bg-blue-500/20 dark:text-blue-300"
                     >
-                      {{ getCodexWindowLabel('secondary') }}
+                      {{ getCodexWindowLabel(account.codexUsage.secondary, 'secondary') }}
                     </span>
                     <div class="flex-1">
                       <div class="flex items-center gap-2">
@@ -1768,7 +2042,92 @@
                   </div>
                 </div>
               </div>
-              <div v-if="!account.codexUsage" class="text-xs text-gray-400">暂无统计</div>
+              <div v-if="!hasAnyCodexWindow(account.codexUsage)" class="text-xs text-gray-400">
+                暂无统计
+              </div>
+            </div>
+            <div v-else-if="account.platform === 'grok'" class="space-y-1.5">
+              <div v-if="account.authType === 'oauth' && account.grokUsage" class="space-y-1.5">
+                <div class="text-[11px] font-medium text-zinc-700 dark:text-zinc-200">
+                  {{ account.grokUsage.planLabel || 'Grok OAuth' }}
+                  <span
+                    v-if="!account.grokUsage.headersObserved"
+                    class="ml-1 font-normal text-gray-400"
+                    >（配额需一次成功请求后显示）</span
+                  >
+                </div>
+                <div
+                  v-for="window in grokQuotaWindows(account)"
+                  :key="window.key"
+                  class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700"
+                >
+                  <div class="flex items-center gap-2">
+                    <span
+                      class="inline-flex min-w-[32px] justify-center rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300"
+                    >
+                      {{ window.label }}
+                    </span>
+                    <div class="flex-1">
+                      <div class="flex items-center gap-2">
+                        <div class="h-2 flex-1 rounded-full bg-gray-200 dark:bg-gray-600">
+                          <div
+                            :class="[
+                              'h-2 rounded-full transition-all duration-300',
+                              getClaudeUsageBarClass(window)
+                            ]"
+                            :style="{ width: getClaudeUsageWidth(window) }"
+                          />
+                        </div>
+                        <span
+                          class="w-12 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
+                        >
+                          {{ formatClaudeUsagePercent(window) }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                    <span v-if="window.used !== null && window.limit">
+                      {{ formatNumber(window.used) }} / {{ formatNumber(window.limit) }}
+                    </span>
+                    <span v-if="window.remainingSeconds !== null" class="ml-1">
+                      重置剩余 {{ formatClaudeRemaining(window) }}
+                    </span>
+                    <span v-if="window.used === null && !window.limit">等待上游配额头</span>
+                  </div>
+                </div>
+              </div>
+              <div class="space-y-1 rounded-lg bg-gray-50 px-2 py-1.5 dark:bg-gray-700">
+                <div
+                  v-for="window in grokRollingWindows"
+                  :key="window.key"
+                  class="flex items-center gap-1.5"
+                  :title="formatGrokRollingTooltip(account.rollingUsage?.[window.key])"
+                >
+                  <span
+                    class="w-6 shrink-0 text-[10px] font-semibold text-zinc-500 dark:text-zinc-300"
+                    >{{ window.label }}</span
+                  >
+                  <div
+                    class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-600"
+                  >
+                    <div
+                      class="h-full rounded-full bg-gradient-to-r from-zinc-500 to-indigo-500 transition-all duration-300"
+                      :style="{
+                        width: grokRollingBarWidth(
+                          account.rollingUsage?.[window.key],
+                          grokRollingMaxCost(account.rollingUsage)
+                        )
+                      }"
+                    />
+                  </div>
+                  <span
+                    class="w-[52px] shrink-0 text-right text-[10px] font-semibold tabular-nums text-gray-800 dark:text-gray-100"
+                  >
+                    ${{ formatCost(account.rollingUsage?.[window.key]?.cost || 0) }}
+                  </span>
+                </div>
+              </div>
             </div>
 
             <!-- 最后使用时间 -->
@@ -1799,8 +2158,25 @@
             </div>
           </div>
 
+          <div
+            v-if="isAccountRoutingBlocked(account)"
+            class="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-800/70 dark:bg-red-900/30 dark:text-red-300"
+          >
+            <div class="font-semibold">不可路由原因</div>
+            <div class="mt-1 break-all">{{ getRoutingBlockReasonSummary(account) }}</div>
+          </div>
+
           <!-- 操作按钮 -->
           <div class="mt-3 flex gap-2 border-t border-gray-100 pt-3">
+            <button
+              v-if="showResetButton(account)"
+              class="flex flex-1 items-center justify-center gap-1 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-amber-900/40 dark:text-amber-300 dark:hover:bg-amber-800/50"
+              :disabled="account.isResetting"
+              @click="resetAccountStatus(account)"
+            >
+              <i :class="['fas fa-redo', account.isResetting ? 'animate-spin' : '']" />
+              重置
+            </button>
             <button
               class="flex flex-1 items-center justify-center gap-1 rounded-lg px-3 py-2 text-xs transition-colors"
               :class="
@@ -1822,6 +2198,13 @@
             >
               <i class="fas fa-chart-line" />
               详情
+            </button>
+            <button
+              class="flex flex-1 items-center justify-center gap-1 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 transition-colors hover:bg-red-100 dark:bg-red-900/40 dark:text-red-300 dark:hover:bg-red-800/50"
+              @click="openErrorHistory(account)"
+            >
+              <i class="fas fa-exclamation-triangle" />
+              错误
             </button>
             <button
               v-if="canTestAccount(account)"
@@ -1996,6 +2379,15 @@
       :show="showAccountUsageModal"
       :summary="accountUsageSummary"
       @close="closeAccountUsageModal"
+    />
+
+    <!-- 错误历史弹窗 -->
+    <AccountErrorHistoryModal
+      :account-id="errorHistoryTarget.accountId"
+      :account-name="errorHistoryTarget.accountName"
+      :account-type="errorHistoryTarget.accountType"
+      :show="showErrorHistoryModal"
+      @close="showErrorHistoryModal = false"
     />
 
     <!-- 账户过期时间编辑弹窗 -->
@@ -2187,6 +2579,7 @@ import * as httpApis from '@/utils/http_apis'
 import AccountForm from '@/components/accounts/AccountForm.vue'
 import CcrAccountForm from '@/components/accounts/CcrAccountForm.vue'
 import AccountUsageDetailModal from '@/components/accounts/AccountUsageDetailModal.vue'
+import AccountErrorHistoryModal from '@/components/accounts/AccountErrorHistoryModal.vue'
 import AccountExpiryEditModal from '@/components/accounts/AccountExpiryEditModal.vue'
 import UnifiedTestModal from '@/components/common/UnifiedTestModal.vue'
 import AccountScheduledTestModal from '@/components/accounts/AccountScheduledTestModal.vue'
@@ -2223,6 +2616,7 @@ const handleCancel = () => {
 const accounts = ref([])
 const accountsLoading = ref(false)
 const refreshingBalances = ref(false)
+const tempUnavailableNowTs = ref(Date.now())
 const accountsSortBy = ref('name')
 const accountsSortOrder = ref('asc')
 const apiKeys = ref([]) // 保留用于其他功能（如删除账户时显示绑定信息）
@@ -2253,6 +2647,57 @@ const selectAllChecked = ref(false)
 const isIndeterminate = ref(false)
 const showCheckboxes = ref(false)
 
+// 错误历史弹窗状态
+const showErrorHistoryModal = ref(false)
+const errorHistoryTarget = ref({ accountType: '', accountId: '', accountName: '' })
+// 前端 platform → 后端 error_history key 的 accountType 映射
+const platformToAccountType = (platform) => {
+  if (platform === 'claude' || platform === 'claude-oauth') return 'claude-official'
+  if (platform === 'azure_openai') return 'azure-openai'
+  return platform
+}
+
+const TEMP_UNAVAILABLE_ACCOUNT_TYPE_ALIASES = {
+  claude: ['claude-official', 'claude'],
+  'claude-console': ['claude-console'],
+  bedrock: ['bedrock'],
+  gemini: ['gemini'],
+  'gemini-api': ['gemini-api'],
+  openai: ['openai'],
+  'openai-responses': ['openai-responses'],
+  ccr: ['ccr'],
+  droid: ['droid'],
+  grok: ['grok'],
+  azure_openai: ['azure-openai'],
+  'azure-openai': ['azure-openai']
+}
+
+const resolveTempUnavailableStatusForAccount = (tempStatuses, account) => {
+  if (!tempStatuses || !account) return null
+
+  const accountTypeAliases = TEMP_UNAVAILABLE_ACCOUNT_TYPE_ALIASES[account.platform] || [
+    account.platform
+  ]
+
+  for (const accountType of accountTypeAliases) {
+    const key = `${accountType}:${account.id}`
+    if (tempStatuses[key]) {
+      return tempStatuses[key]
+    }
+  }
+
+  return null
+}
+
+const openErrorHistory = (account) => {
+  errorHistoryTarget.value = {
+    accountType: platformToAccountType(account.platform),
+    accountId: account.id,
+    accountName: account.name || account.email || account.id
+  }
+  showErrorHistoryModal.value = true
+}
+
 // 账号使用详情弹窗状态
 const showAccountUsageModal = ref(false)
 const accountUsageLoading = ref(false)
@@ -2269,6 +2714,7 @@ const supportedUsagePlatforms = [
   'openai-responses',
   'gemini',
   'droid',
+  'grok',
   'gemini-api',
   'bedrock'
 ]
@@ -2349,6 +2795,12 @@ const platformHierarchy = [
     label: 'Droid（全部）',
     icon: 'fa-robot',
     children: [{ value: 'droid', label: 'Droid', icon: 'fa-robot' }]
+  },
+  {
+    value: 'group-grok',
+    label: 'Grok（全部）',
+    icon: 'fa-bolt',
+    children: [{ value: 'grok', label: 'Grok / xAI', icon: 'fa-bolt' }]
   }
 ]
 
@@ -2357,7 +2809,8 @@ const platformGroupMap = {
   'group-claude': ['claude', 'claude-console', 'bedrock', 'ccr'],
   'group-openai': ['openai', 'openai-responses', 'azure_openai'],
   'group-gemini': ['gemini', 'gemini-api'],
-  'group-droid': ['droid']
+  'group-droid': ['droid'],
+  'group-grok': ['grok']
 }
 
 // 平台请求处理器
@@ -2371,6 +2824,7 @@ const platformRequestHandlers = {
   'openai-responses': () => httpApis.getOpenAIResponsesAccountsApi(),
   ccr: () => httpApis.getCcrAccountsApi(),
   droid: () => httpApis.getDroidAccountsApi(),
+  grok: () => httpApis.getGrokAccountsApi(),
   'gemini-api': () => httpApis.getGeminiApiAccountsApi()
 }
 
@@ -2414,7 +2868,7 @@ const groupOptions = computed(() => {
   accountGroups.value.forEach((group) => {
     options.push({
       value: group.id,
-      label: `${group.name} (${group.platform === 'claude' ? 'Claude' : group.platform === 'gemini' ? 'Gemini' : group.platform === 'openai' ? 'OpenAI' : 'Droid'})`,
+      label: `${group.name} (${group.platform === 'claude' ? 'Claude' : group.platform === 'gemini' ? 'Gemini' : group.platform === 'openai' ? 'OpenAI' : group.platform === 'grok' ? 'Grok' : 'Droid'})`,
       icon:
         group.platform === 'claude'
           ? 'fa-brain'
@@ -2509,18 +2963,12 @@ const showResetButton = (account) => {
     'gemini-api',
     'ccr',
     'droid',
+    'grok',
     'bedrock',
-    'azure-openai'
+    'azure-openai',
+    'azure_openai'
   ]
-  return (
-    supportedPlatforms.includes(account.platform) &&
-    (account.status === 'unauthorized' ||
-      account.status !== 'active' ||
-      account.rateLimitStatus?.isRateLimited ||
-      account.rateLimitStatus === 'limited' ||
-      account.tempUnavailable ||
-      !account.isActive)
-  )
+  return supportedPlatforms.includes(account.platform) && isAccountRoutingBlocked(account)
 }
 
 // 获取账户操作菜单项（用于小屏下拉菜单）
@@ -2548,6 +2996,15 @@ const getAccountActions = (account) => {
       handler: () => openAccountUsageModal(account)
     })
   }
+
+  // 错误历史
+  actions.push({
+    key: 'error-history',
+    label: '错误历史',
+    icon: 'fa-exclamation-triangle',
+    color: 'red',
+    handler: () => openErrorHistory(account)
+  })
 
   // 测试账户
   if (canTestAccount(account)) {
@@ -2597,7 +3054,10 @@ const openAccountUsageModal = async (account) => {
   if (response.success) {
     const data = response.data || {}
     accountUsageHistory.value = data.history || []
-    accountUsageSummary.value = data.summary || {}
+    accountUsageSummary.value = {
+      ...(data.summary || {}),
+      rollingUsage: data.rollingUsage || data.summary?.rollingUsage || null
+    }
     accountUsageOverview.value = data.overview || {}
     accountUsageGeneratedAt.value = data.generatedAt || ''
   } else {
@@ -2622,6 +3082,7 @@ const supportedTestPlatforms = [
   'openai-responses',
   'azure-openai',
   'droid',
+  'grok',
   'ccr'
 ]
 
@@ -2810,7 +3271,8 @@ const accountStats = computed(() => {
     { value: 'bedrock', label: 'Bedrock' },
     { value: 'openai-responses', label: 'OpenAI-Responses' },
     { value: 'ccr', label: 'CCR' },
-    { value: 'droid', label: 'Droid' }
+    { value: 'droid', label: 'Droid' },
+    { value: 'grok', label: 'Grok' }
   ]
 
   return platforms
@@ -3188,18 +3650,35 @@ const loadAccounts = async (forceReload = false) => {
       platformsToFetch.map(async (platform) => {
         const handler = platformRequestHandlers[platform]
         if (!handler) {
-          return { platform, success: true, data: [] }
+          return { platform, success: true, data: [], message: '' }
         }
 
         try {
           const res = await handler(params)
-          return { platform, success: res?.success, data: res?.data }
+          return {
+            platform,
+            success: !!res?.success,
+            data: res?.data,
+            message: res?.message || ''
+          }
         } catch (error) {
           console.debug(`Failed to load ${platform} accounts:`, error)
-          return { platform, success: false, data: [] }
+          return { platform, success: false, data: [], message: error?.message || '' }
         }
       })
     )
+
+    const failedPlatforms = platformResults.filter((item) => !item.success)
+    if (failedPlatforms.length > 0) {
+      const failedLabels = failedPlatforms.map((item) => item.platform).join(', ')
+      const firstErrorMessage =
+        failedPlatforms.find((item) => typeof item.message === 'string' && item.message.trim())
+          ?.message || ''
+      showToast(
+        `以下平台账户加载失败：${failedLabels}${firstErrorMessage ? `（${firstErrorMessage}）` : ''}`,
+        'warning'
+      )
+    }
 
     const allAccounts = []
     const counts = bindingCounts.value || {}
@@ -3272,6 +3751,14 @@ const loadAccounts = async (forceReload = false) => {
           allAccounts.push(...items)
           break
         }
+        case 'grok': {
+          const items = list.map((acc) => {
+            const boundApiKeysCount = counts.grokAccountId?.[acc.id] || acc.boundApiKeysCount || 0
+            return { ...acc, platform: 'grok', boundApiKeysCount }
+          })
+          allAccounts.push(...items)
+          break
+        }
         case 'gemini-api': {
           const items = list.map((acc) => {
             const boundApiKeysCount = counts.geminiAccountId?.[`api:${acc.id}`] || 0
@@ -3334,23 +3821,7 @@ const loadAccounts = async (forceReload = false) => {
       if (tempRes?.success && tempRes.data) {
         const tempStatuses = tempRes.data
         filteredAccounts = filteredAccounts.map((account) => {
-          // 尝试匹配 accountType:accountId
-          const platformTypeMap = {
-            claude: 'claude-official',
-            'claude-console': 'claude-console',
-            bedrock: 'bedrock',
-            gemini: 'gemini',
-            'gemini-api': 'gemini-api',
-            openai: 'openai',
-            'openai-responses': 'openai-responses',
-            ccr: 'ccr',
-            droid: 'droid',
-            azure_openai: 'azure-openai',
-            'azure-openai': 'azure-openai'
-          }
-          const accountType = platformTypeMap[account.platform] || account.platform
-          const key = `${accountType}:${account.id}`
-          const tempStatus = tempStatuses[key]
+          const tempStatus = resolveTempUnavailableStatusForAccount(tempStatuses, account)
           if (tempStatus) {
             return { ...account, tempUnavailable: tempStatus }
           }
@@ -3613,6 +4084,69 @@ const formatRemainingTime = (minutes) => {
 }
 
 // 格式化限流时间（支持显示天数）
+// 需要在账号列表上展示徽章的模型家族，顺序即展示顺序。
+// 后端 RATE_LIMITED_MODEL_FAMILIES 还包含 sonnet，但这里刻意不展示：
+// sonnet 是默认主力模型，限流触发频繁且几乎所有账号都会周期性命中，
+// 徽章会一直亮着，反而把 Opus / Fable 这类真正影响路由判断的信号淹没。
+// sonnet 的限流状态仍然在 modelRateLimitStatus 里，调度行为不受影响。
+const MODEL_RATE_LIMIT_FAMILIES = [
+  { key: 'opus', label: 'Opus' },
+  { key: 'haiku', label: 'Haiku' },
+  { key: 'fable', label: 'Fable' }
+]
+
+// 取出账号上所有处于限流中的模型家族。
+// 后端 /admin/claude-accounts 返回 modelRateLimitStatus（含全部家族）；
+// 同时兼容只有 opusRateLimitStatus / fableRateLimitStatus 的旧数据。
+const getLimitedModelFamilies = (account) => {
+  if (!account) return []
+
+  const legacy = {
+    opus: account.opusRateLimitStatus,
+    fable: account.fableRateLimitStatus
+  }
+
+  return MODEL_RATE_LIMIT_FAMILIES.map(({ key, label }) => {
+    const status = account.modelRateLimitStatus?.[key] || legacy[key]
+    if (!status?.isRateLimited) return null
+
+    const minutesRemaining = Number.isFinite(status.minutesRemaining)
+      ? Math.max(0, Math.ceil(status.minutesRemaining))
+      : 0
+
+    return { key, label, minutesRemaining, resetAt: status.resetAt || null }
+  }).filter(Boolean)
+}
+
+// 上游按模型限定的周窗口（limits[] 里的 weekly_scoped），标签用上游给的
+// display_name，有几个就显示几条；上游没回传就不显示。
+const getScopedModelUsage = (account) => {
+  const scoped = account?.claudeUsage?.sevenDayScopedModels
+  if (!Array.isArray(scoped)) {
+    return []
+  }
+  return scoped.filter((item) => item?.modelName && item.utilization !== null)
+}
+
+// 顶层具名窗口（后端 sevenDayOpus，数据源其实是上游的 seven_day_sonnet）。
+// 对 Max 账号它一直是 null，模型级额度在 limits[] 里；但对确实回传了该窗口的账号
+// 不能因为没有 weekly_scoped 就把这条进度条整个删掉，所以保留一条回退渲染。
+const LEGACY_SEVEN_DAY_MODEL_LABEL = 'Sonnet'
+
+const hasLegacySevenDayModelWindow = (account) => {
+  const window = account?.claudeUsage?.sevenDayOpus
+  // 判据与 getScopedModelUsage 保持一致：只有 resetsAt 没有百分比时不画
+  // （否则会出现一条百分比恒为 "-" 的空条，而同样缺数据的 scoped 窗口是被隐藏的）
+  if (!window || window.utilization === null || window.utilization === undefined) {
+    return false
+  }
+  // 上游若同时在 limits[] 里回传了同名的 weekly_scoped 条目，就以那条为准，
+  // 否则会出现两条都叫 Sonnet、百分比还不一样的进度条
+  return !getScopedModelUsage(account).some(
+    (item) => item.modelName === LEGACY_SEVEN_DAY_MODEL_LABEL
+  )
+}
+
 const formatRateLimitTime = (minutes) => {
   if (!minutes || minutes <= 0) return ''
 
@@ -3652,6 +4186,105 @@ const formatTempUnavailableTime = (seconds) => {
   const secs = seconds % 60
   if (mins > 0) return `${mins}m${secs > 0 ? secs + 's' : ''}`
   return `${secs}s`
+}
+
+const toPositiveInteger = (value) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0
+}
+
+const getTempUnavailableRemainingSeconds = (tempUnavailable) => {
+  if (!tempUnavailable) return 0
+  const serverRemainingSeconds = toPositiveInteger(
+    tempUnavailable.remainingSeconds || tempUnavailable.ttl
+  )
+
+  const recoveryAt = getTempUnavailableRecoveryAt(tempUnavailable)
+  if (!recoveryAt) {
+    return serverRemainingSeconds
+  }
+
+  const recoveryAtTimestamp = new Date(recoveryAt).getTime()
+  if (Number.isNaN(recoveryAtTimestamp)) {
+    return serverRemainingSeconds
+  }
+
+  const liveRemainingSeconds = Math.max(
+    0,
+    Math.ceil((recoveryAtTimestamp - tempUnavailableNowTs.value) / 1000)
+  )
+
+  if (serverRemainingSeconds <= 0) {
+    return liveRemainingSeconds
+  }
+  return Math.min(serverRemainingSeconds, liveRemainingSeconds)
+}
+
+const getTempUnavailableCooldownSeconds = (tempUnavailable) => {
+  if (!tempUnavailable) return 0
+  return toPositiveInteger(tempUnavailable.cooldownSeconds)
+}
+
+const getTempUnavailableRecoveryAt = (tempUnavailable) => {
+  if (!tempUnavailable) return ''
+
+  if (tempUnavailable.expiresAt) {
+    const expiresAt = new Date(tempUnavailable.expiresAt)
+    if (!Number.isNaN(expiresAt.getTime())) {
+      return tempUnavailable.expiresAt
+    }
+  }
+
+  if (tempUnavailable.markedAt) {
+    const markedAt = new Date(tempUnavailable.markedAt)
+    const cooldownSeconds = getTempUnavailableCooldownSeconds(tempUnavailable)
+    if (!Number.isNaN(markedAt.getTime()) && cooldownSeconds > 0) {
+      return new Date(markedAt.getTime() + cooldownSeconds * 1000).toISOString()
+    }
+  }
+
+  return ''
+}
+
+const formatTempUnavailableRecoveryAt = (tempUnavailable) => {
+  const recoveryAt = getTempUnavailableRecoveryAt(tempUnavailable)
+  if (!recoveryAt) return ''
+
+  const recoveryDate = new Date(recoveryAt)
+  if (Number.isNaN(recoveryDate.getTime())) return ''
+
+  const month = `${recoveryDate.getMonth() + 1}`.padStart(2, '0')
+  const day = `${recoveryDate.getDate()}`.padStart(2, '0')
+  const hours = `${recoveryDate.getHours()}`.padStart(2, '0')
+  const minutes = `${recoveryDate.getMinutes()}`.padStart(2, '0')
+  const seconds = `${recoveryDate.getSeconds()}`.padStart(2, '0')
+  return `${month}-${day} ${hours}:${minutes}:${seconds}`
+}
+
+const getTempUnavailableTooltipContent = (tempUnavailable) => {
+  if (!tempUnavailable) return ''
+
+  const details = []
+  const statusCodeText = tempUnavailable.statusCode ? `HTTP ${tempUnavailable.statusCode}` : ''
+  const errorTypeText = tempUnavailable.errorType || 'upstream_error'
+  details.push(`${errorTypeText}${statusCodeText ? ` (${statusCodeText})` : ''}`)
+
+  const cooldownSeconds = getTempUnavailableCooldownSeconds(tempUnavailable)
+  if (cooldownSeconds > 0) {
+    details.push(`内部冷却 ${formatTempUnavailableTime(cooldownSeconds)}`)
+  }
+
+  const remainingSeconds = getTempUnavailableRemainingSeconds(tempUnavailable)
+  if (remainingSeconds > 0) {
+    details.push(`剩余 ${formatTempUnavailableTime(remainingSeconds)}`)
+  }
+
+  const recoveryAtText = formatTempUnavailableRecoveryAt(tempUnavailable)
+  if (recoveryAtText) {
+    details.push(`预计恢复 ${recoveryAtText}`)
+  }
+
+  return details.join('，')
 }
 
 // 检查账户是否被限流
@@ -3735,7 +4368,8 @@ const getBoundApiKeysForAccount = (account) => {
       key.openaiAccountId === accountId ||
       key.azureOpenaiAccountId === accountId ||
       key.openaiAccountId === `responses:${accountId}` ||
-      key.geminiAccountId === `api:${accountId}`
+      key.geminiAccountId === `api:${accountId}` ||
+      key.grokAccountId === accountId
     )
   })
 }
@@ -3760,6 +4394,8 @@ const resolveAccountDeleteEndpoint = (account) => {
       return `/admin/gemini-accounts/${account.id}`
     case 'droid':
       return `/admin/droid-accounts/${account.id}`
+    case 'grok':
+      return `/admin/grok-accounts/${account.id}`
     case 'gemini-api':
       return `/admin/gemini-api-accounts/${account.id}`
     default:
@@ -3899,6 +4535,41 @@ const batchDeleteAccounts = async () => {
   updateSelectAllState()
 }
 
+const RESET_STATUS_ENDPOINT_MAP = {
+  openai: (id) => `/admin/openai-accounts/${id}/reset-status`,
+  'openai-responses': (id) => `/admin/openai-responses-accounts/${id}/reset-status`,
+  claude: (id) => `/admin/claude-accounts/${id}/reset-status`,
+  'claude-console': (id) => `/admin/claude-console-accounts/${id}/reset-status`,
+  ccr: (id) => `/admin/ccr-accounts/${id}/reset-status`,
+  droid: (id) => `/admin/droid-accounts/${id}/reset-status`,
+  grok: (id) => `/admin/grok-accounts/${id}/reset-status`,
+  'gemini-api': (id) => `/admin/gemini-api-accounts/${id}/reset-status`,
+  gemini: (id) => `/admin/gemini-accounts/${id}/reset-status`,
+  bedrock: (id) => `/admin/bedrock-accounts/${id}/reset-status`,
+  'azure-openai': (id) => `/admin/azure-openai-accounts/${id}/reset-status`,
+  azure_openai: (id) => `/admin/azure-openai-accounts/${id}/reset-status`
+}
+
+const TOGGLE_SCHEDULABLE_ENDPOINT_MAP = {
+  claude: (id) => `/admin/claude-accounts/${id}/toggle-schedulable`,
+  'claude-console': (id) => `/admin/claude-console-accounts/${id}/toggle-schedulable`,
+  bedrock: (id) => `/admin/bedrock-accounts/${id}/toggle-schedulable`,
+  gemini: (id) => `/admin/gemini-accounts/${id}/toggle-schedulable`,
+  openai: (id) => `/admin/openai-accounts/${id}/toggle-schedulable`,
+  azure_openai: (id) => `/admin/azure-openai-accounts/${id}/toggle-schedulable`,
+  'azure-openai': (id) => `/admin/azure-openai-accounts/${id}/toggle-schedulable`,
+  'openai-responses': (id) => `/admin/openai-responses-accounts/${id}/toggle-schedulable`,
+  ccr: (id) => `/admin/ccr-accounts/${id}/toggle-schedulable`,
+  droid: (id) => `/admin/droid-accounts/${id}/toggle-schedulable`,
+  grok: (id) => `/admin/grok-accounts/${id}/toggle-schedulable`,
+  'gemini-api': (id) => `/admin/gemini-api-accounts/${id}/toggle-schedulable`
+}
+
+const resolveEndpointByPlatform = (mapping, platform, id) => {
+  const builder = mapping[platform]
+  return typeof builder === 'function' ? builder(id) : ''
+}
+
 // 重置账户状态
 const resetAccountStatus = async (account) => {
   if (account.isResetting) return
@@ -3916,29 +4587,12 @@ const resetAccountStatus = async (account) => {
   try {
     account.isResetting = true
 
-    // 根据账户平台选择不同的 API 端点
-    let endpoint = ''
-    if (account.platform === 'openai') {
-      endpoint = `/admin/openai-accounts/${account.id}/reset-status`
-    } else if (account.platform === 'openai-responses') {
-      endpoint = `/admin/openai-responses-accounts/${account.id}/reset-status`
-    } else if (account.platform === 'claude') {
-      endpoint = `/admin/claude-accounts/${account.id}/reset-status`
-    } else if (account.platform === 'claude-console') {
-      endpoint = `/admin/claude-console-accounts/${account.id}/reset-status`
-    } else if (account.platform === 'ccr') {
-      endpoint = `/admin/ccr-accounts/${account.id}/reset-status`
-    } else if (account.platform === 'droid') {
-      endpoint = `/admin/droid-accounts/${account.id}/reset-status`
-    } else if (account.platform === 'gemini-api') {
-      endpoint = `/admin/gemini-api-accounts/${account.id}/reset-status`
-    } else if (account.platform === 'gemini') {
-      endpoint = `/admin/gemini-accounts/${account.id}/reset-status`
-    } else if (account.platform === 'bedrock') {
-      endpoint = `/admin/bedrock-accounts/${account.id}/reset-status`
-    } else if (account.platform === 'azure-openai') {
-      endpoint = `/admin/azure-openai-accounts/${account.id}/reset-status`
-    } else {
+    const endpoint = resolveEndpointByPlatform(
+      RESET_STATUS_ENDPOINT_MAP,
+      account.platform,
+      account.id
+    )
+    if (!endpoint) {
       showToast('不支持的账户类型', 'error')
       account.isResetting = false
       return
@@ -3963,28 +4617,12 @@ const toggleSchedulable = async (account) => {
   if (account.isTogglingSchedulable) return
   account.isTogglingSchedulable = true
 
-  let endpoint
-  if (account.platform === 'claude') {
-    endpoint = `/admin/claude-accounts/${account.id}/toggle-schedulable`
-  } else if (account.platform === 'claude-console') {
-    endpoint = `/admin/claude-console-accounts/${account.id}/toggle-schedulable`
-  } else if (account.platform === 'bedrock') {
-    endpoint = `/admin/bedrock-accounts/${account.id}/toggle-schedulable`
-  } else if (account.platform === 'gemini') {
-    endpoint = `/admin/gemini-accounts/${account.id}/toggle-schedulable`
-  } else if (account.platform === 'openai') {
-    endpoint = `/admin/openai-accounts/${account.id}/toggle-schedulable`
-  } else if (account.platform === 'azure_openai') {
-    endpoint = `/admin/azure-openai-accounts/${account.id}/toggle-schedulable`
-  } else if (account.platform === 'openai-responses') {
-    endpoint = `/admin/openai-responses-accounts/${account.id}/toggle-schedulable`
-  } else if (account.platform === 'ccr') {
-    endpoint = `/admin/ccr-accounts/${account.id}/toggle-schedulable`
-  } else if (account.platform === 'droid') {
-    endpoint = `/admin/droid-accounts/${account.id}/toggle-schedulable`
-  } else if (account.platform === 'gemini-api') {
-    endpoint = `/admin/gemini-api-accounts/${account.id}/toggle-schedulable`
-  } else {
+  const endpoint = resolveEndpointByPlatform(
+    TOGGLE_SCHEDULABLE_ENDPOINT_MAP,
+    account.platform,
+    account.id
+  )
+  if (!endpoint) {
     showToast('该账户类型暂不支持调度控制', 'warning')
     account.isTogglingSchedulable = false
     return
@@ -4193,7 +4831,7 @@ const getSchedulableReason = (account) => {
     if (account.status === 'quota_exceeded') {
       return '余额不足'
     }
-    if (account.overloadStatus === 'overloaded') {
+    if (account.overloadStatus === 'overloaded' || account.overloadStatus?.isOverloaded) {
       return '服务过载（529错误）'
     }
     if (account.rateLimitStatus === 'limited') {
@@ -4285,6 +4923,157 @@ const getSchedulableReason = (account) => {
   return '手动停止调度'
 }
 
+const normalizeReasonText = (reason) => {
+  if (typeof reason !== 'string') return ''
+  return reason.trim()
+}
+
+const dedupeRoutingReasons = (reasons) => {
+  const normalized = reasons.map(normalizeReasonText).filter(Boolean)
+  return Array.from(new Set(normalized))
+}
+
+const isAccountExpiredForRouting = (account) => {
+  if (!account || !account.expiresAt) return false
+  if (account.platform !== 'claude-console' && account.platform !== 'bedrock') return false
+  return isExpired(account.expiresAt)
+}
+
+const isAccountRoutingBlocked = (account) => {
+  if (!account) return false
+
+  if (account.isActive === false || account.schedulable === false) {
+    return true
+  }
+
+  if (
+    [
+      'blocked',
+      'unauthorized',
+      'temp_error',
+      'error',
+      'quota_exceeded',
+      'account_blocked'
+    ].includes(account.status)
+  ) {
+    return true
+  }
+
+  if (isAccountRateLimited(account) || account.tempUnavailable) {
+    return true
+  }
+
+  if (account.overloadStatus?.isOverloaded) {
+    return true
+  }
+
+  if (getLimitedModelFamilies(account).length > 0) {
+    return true
+  }
+
+  if (isAccountExpiredForRouting(account)) {
+    return true
+  }
+
+  return false
+}
+
+const getRoutingBlockReasons = (account) => {
+  if (!account) return []
+
+  const reasons = []
+
+  if (account.isActive === false) {
+    reasons.push('账号已禁用')
+  }
+
+  if (account.status === 'blocked') {
+    reasons.push(account.errorMessage || '账号已封锁（403）')
+  }
+
+  if (account.status === 'unauthorized') {
+    reasons.push(account.errorMessage || '认证失败（401）')
+  }
+
+  if (account.status === 'temp_error') {
+    reasons.push(account.errorMessage || '临时异常（上游错误）')
+  }
+
+  if (account.status === 'error') {
+    reasons.push(account.errorMessage || '账号状态异常')
+  }
+
+  if (account.status === 'quota_exceeded') {
+    reasons.push('余额/配额不足')
+  }
+
+  if (account.status === 'account_blocked') {
+    reasons.push(account.errorMessage || '账号被上游封禁')
+  }
+
+  if (account.schedulable === false) {
+    reasons.push(getSchedulableReason(account) || '已暂停调度')
+  }
+
+  if (isAccountRateLimited(account)) {
+    const minutes = getRateLimitRemainingMinutes(account)
+    reasons.push(
+      minutes > 0 ? `触发限流（约 ${formatRateLimitTime(minutes)} 后恢复）` : '触发限流（429）'
+    )
+  }
+
+  if (account.tempUnavailable) {
+    const cooldownSeconds = getTempUnavailableCooldownSeconds(account.tempUnavailable)
+    const remainingSeconds = getTempUnavailableRemainingSeconds(account.tempUnavailable)
+    const recoveryAtText = formatTempUnavailableRecoveryAt(account.tempUnavailable)
+
+    const detailParts = []
+    if (cooldownSeconds > 0) {
+      detailParts.push(`内部冷却 ${formatTempUnavailableTime(cooldownSeconds)}`)
+    }
+    if (remainingSeconds > 0) {
+      detailParts.push(`剩余 ${formatTempUnavailableTime(remainingSeconds)}`)
+    }
+    if (recoveryAtText) {
+      detailParts.push(`预计恢复 ${recoveryAtText}`)
+    }
+
+    const detailText = detailParts.length > 0 ? `，${detailParts.join('，')}` : ''
+    const tempReason = account.tempUnavailable.errorType
+      ? `临时暂停（${account.tempUnavailable.errorType}${account.tempUnavailable.statusCode ? ` / HTTP ${account.tempUnavailable.statusCode}` : ''}${detailText}）`
+      : `临时暂停${detailParts.length > 0 ? `（${detailParts.join('，')}）` : ''}`
+    reasons.push(tempReason)
+  }
+
+  for (const family of getLimitedModelFamilies(account)) {
+    reasons.push(
+      family.minutesRemaining > 0
+        ? `${family.label} 模型限流中（约 ${formatRateLimitTime(family.minutesRemaining)} 后恢复）`
+        : `${family.label} 模型限流中`
+    )
+  }
+
+  if (account.overloadStatus?.isOverloaded) {
+    reasons.push('上游过载保护中（529）')
+  }
+
+  if (isAccountExpiredForRouting(account)) {
+    reasons.push('订阅已过期')
+  }
+
+  const deduped = dedupeRoutingReasons(reasons)
+  if (deduped.length === 0 && isAccountRoutingBlocked(account)) {
+    return ['调度器判定不可路由（无详细原因）']
+  }
+
+  return deduped
+}
+
+const getRoutingBlockReasonSummary = (account) => {
+  const reasons = getRoutingBlockReasons(account)
+  return reasons.length > 0 ? reasons.join('；') : '无'
+}
+
 // 检查是否是配额超限状态（用于状态显示判断）
 const isQuotaExceeded = (account) => {
   return (
@@ -4308,6 +5097,8 @@ const getAccountStatusText = (account) => {
     account.rateLimitStatus === 'limited'
   )
     return '限流中'
+  if (account.tempUnavailable) return '临时暂停'
+  if (account.overloadStatus?.isOverloaded) return '过载保护中'
   // 检查是否临时错误
   if (account.status === 'temp_error') return '临时异常'
   // 检查是否错误
@@ -4332,6 +5123,9 @@ const getAccountStatusClass = (account) => {
     (account.rateLimitStatus && account.rateLimitStatus.isRateLimited) ||
     account.rateLimitStatus === 'limited'
   ) {
+    return 'bg-orange-100 text-orange-800'
+  }
+  if (account.tempUnavailable || account.overloadStatus?.isOverloaded) {
     return 'bg-orange-100 text-orange-800'
   }
   if (account.status === 'temp_error') {
@@ -4361,6 +5155,9 @@ const getAccountStatusDotClass = (account) => {
     (account.rateLimitStatus && account.rateLimitStatus.isRateLimited) ||
     account.rateLimitStatus === 'limited'
   ) {
+    return 'bg-orange-500'
+  }
+  if (account.tempUnavailable || account.overloadStatus?.isOverloaded) {
     return 'bg-orange-500'
   }
   if (account.status === 'temp_error') {
@@ -4557,11 +5354,89 @@ const getCodexUsageWidth = (usageItem) => {
 }
 
 // 时间窗口标签
-const getCodexWindowLabel = (type) => {
-  if (type === 'secondary') {
-    return '周限'
+// 把窗口长度（分钟）转成展示名。
+const formatCodexWindowMinutes = (minutes) => {
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    return ''
   }
-  return '5h'
+  if (minutes % 10080 === 0) {
+    const weeks = minutes / 10080
+    return weeks === 1 ? '周限' : `${weeks}周`
+  }
+  if (minutes % 1440 === 0) {
+    return `${minutes / 1440}天`
+  }
+  if (minutes % 60 === 0) {
+    return `${minutes / 60}h`
+  }
+  return `${minutes}m`
+}
+
+// Codex 用量窗口的展示名必须按 windowMinutes 推导，不能按槽位硬编码。
+// 上游会按套餐回传不同的窗口组合：Plus 一般是 5h(300) + 周限(10080) 两个；
+// 而 Pro 只回传一个窗口，且落在 primary 槽位里，windowMinutes = 10080（7 天）。
+// 旧代码固定 primary='5h' / secondary='周限'，Pro 账号就会显示成
+// 「5h 75%」+「周限 0% 重置剩余 0秒」——两个标签都是错的。
+const getCodexWindowLabel = (usageItem, fallbackType) => {
+  const label = formatCodexWindowMinutes(usageItem?.windowMinutes)
+  if (label) {
+    return label
+  }
+  return fallbackType === 'secondary' ? '周限' : '5h'
+}
+
+// 上游没有回传的窗口不应该渲染成一条 0% 的进度条。
+const hasCodexWindow = (usageItem) => {
+  if (!usageItem) {
+    return false
+  }
+  if (Number.isFinite(usageItem.windowMinutes) && usageItem.windowMinutes > 0) {
+    return true
+  }
+  // 兼容没有记录 windowMinutes 的旧数据：只要有用量或重置信息就仍然展示
+  return (
+    (Number.isFinite(usageItem.usedPercent) && usageItem.usedPercent > 0) ||
+    (Number.isFinite(usageItem.resetAfterSeconds) && usageItem.resetAfterSeconds > 0)
+  )
+}
+
+const hasAnyCodexWindow = (codexUsage) =>
+  !!codexUsage && (hasCodexWindow(codexUsage.primary) || hasCodexWindow(codexUsage.secondary))
+
+const grokRollingWindows = [
+  { key: 'fiveHour', label: '5h' },
+  { key: 'oneDay', label: '1d' },
+  { key: 'sevenDay', label: '7d' },
+  { key: 'thirtyDay', label: '30d' }
+]
+
+const grokRollingMaxCost = (rolling) =>
+  Math.max(...grokRollingWindows.map((window) => Number(rolling?.[window.key]?.cost || 0)), 0)
+
+const grokRollingBarWidth = (usage, maxCost) => {
+  const cost = Number(usage?.cost || 0)
+  if (!maxCost || cost <= 0) {
+    return '0%'
+  }
+  return `${Math.max(6, Math.min(100, (cost / maxCost) * 100))}%`
+}
+
+const formatGrokRollingTooltip = (usage) => {
+  const cost = formatCost(usage?.cost || 0)
+  const tokens = formatNumber(usage?.tokens || 0)
+  const requests = usage?.requests || 0
+  return `$${cost} · ${tokens} tokens · ${requests} 次`
+}
+
+const grokQuotaWindows = (account) => {
+  const usage = account?.grokUsage
+  if (!usage) {
+    return []
+  }
+  return [
+    { key: 'tokens', label: 'tokens', ...(usage.tokens || {}) },
+    { key: 'requests', label: 'req', ...(usage.requests || {}) }
+  ]
 }
 
 // 格式化剩余时间
@@ -4804,6 +5679,9 @@ const handleSaveAccountExpiry = async ({ accountId, expiresAt }) => {
       case 'droid':
         endpoint = `/admin/droid-accounts/${accountId}` // 使用 :id
         break
+      case 'grok':
+        endpoint = `/admin/grok-accounts/${accountId}`
+        break
       case 'azure_openai':
         endpoint = `/admin/azure-openai-accounts/${accountId}` // 使用 :id
         break
@@ -4842,10 +5720,16 @@ const checkHorizontalScroll = () => {
 
 // 窗口大小变化时重新检测
 let resizeObserver = null
+let tempUnavailableCountdownTimer = null
 
 onMounted(() => {
   // 首次加载时强制刷新所有数据
   loadAccounts(true)
+
+  // 让临时不可用剩余时间在页面停留时也可见地递减
+  tempUnavailableCountdownTimer = setInterval(() => {
+    tempUnavailableNowTs.value = Date.now()
+  }, 1000)
 
   // 设置ResizeObserver监听表格容器大小变化
   nextTick(() => {
@@ -4865,6 +5749,10 @@ onMounted(() => {
 onUnmounted(() => {
   if (resizeObserver) {
     resizeObserver.disconnect()
+  }
+  if (tempUnavailableCountdownTimer) {
+    clearInterval(tempUnavailableCountdownTimer)
+    tempUnavailableCountdownTimer = null
   }
   window.removeEventListener('resize', checkHorizontalScroll)
 })

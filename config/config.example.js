@@ -44,9 +44,20 @@ const config = {
   claude: {
     apiUrl: process.env.CLAUDE_API_URL || 'https://api.anthropic.com/v1/messages',
     apiVersion: process.env.CLAUDE_API_VERSION || '2023-06-01',
+    // 专属账号不可用时是否回退到共享池。
+    // 默认 false：API Key 绑定了专属账号就必须使用该账号，不可用时直接报错，
+    // 否则「限定账号」的语义会被破坏（请求会静默用到别的账号）。
+    dedicatedAccountFallback: process.env.CLAUDE_DEDICATED_ACCOUNT_FALLBACK === 'true',
     betaHeader:
       process.env.CLAUDE_BETA_HEADER ||
       'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14',
+    // 模型级限流「兜底时长」上限（秒）。
+    // 上游 429 时会优先读取 status=rejected 的那个窗口（5h / 7d / 7d_oi）的 reset；
+    // 只有在上游没回传窗口信息时，才退回 anthropic-ratelimit-unified-reset。
+    // 而后者是「代表窗口」的 reset，可能指向一周之后 —— 不钳制就会把某个模型
+    // 在这个账号上误停数天。钳制后最坏是每小时多试一次（代价一个 429）。
+    maxModelRateLimitFallbackSeconds:
+      parseInt(process.env.CLAUDE_MAX_MODEL_RATE_LIMIT_FALLBACK_SECONDS) || 3600,
     overloadHandling: {
       enabled: (() => {
         const minutes = parseInt(process.env.CLAUDE_OVERLOAD_HANDLING_MINUTES) || 0
@@ -231,11 +242,17 @@ const config = {
   },
 
   // ⏱️ 上游错误自动暂停配置
+  // 说明：此处是全局默认值。Claude 官方 OAuth 账号可在后台做账号级 503/5xx 覆盖，
+  // 且可通过账号设置禁用 temp_unavailable（账号级策略优先于全局默认值）。
   upstreamError: {
+    serviceUnavailableTtlSeconds: parseInt(process.env.UPSTREAM_ERROR_503_TTL_SECONDS) || 60, // 503错误暂停秒数
     serverErrorTtlSeconds: parseInt(process.env.UPSTREAM_ERROR_5XX_TTL_SECONDS) || 300, // 5xx错误暂停秒数
     overloadTtlSeconds: parseInt(process.env.UPSTREAM_ERROR_OVERLOAD_TTL_SECONDS) || 600, // 529过载暂停秒数
     authErrorTtlSeconds: parseInt(process.env.UPSTREAM_ERROR_AUTH_TTL_SECONDS) || 1800, // 401/403认证错误暂停秒数
-    timeoutTtlSeconds: parseInt(process.env.UPSTREAM_ERROR_TIMEOUT_TTL_SECONDS) || 300 // 504超时暂停秒数
+    timeoutTtlSeconds: parseInt(process.env.UPSTREAM_ERROR_TIMEOUT_TTL_SECONDS) || 300, // 504超时暂停秒数
+    // 上游 retry-after 派生的暂停时长上限（秒）。周级限额的 retry-after 可达数天，
+    // 若不钳制会把账号整整下线数天。长时限额应由账号级/模型级限流桶承担。
+    maxCustomTtlSeconds: parseInt(process.env.UPSTREAM_ERROR_MAX_CUSTOM_TTL_SECONDS) || 1800
   }
 }
 

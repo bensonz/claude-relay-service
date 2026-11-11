@@ -9,6 +9,10 @@ const config = require('../../../config/config')
 const crypto = require('crypto')
 const LRUCache = require('../../utils/lruCache')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const {
+  createRequestDetailMeta,
+  extractOpenAICacheReadTokens
+} = require('../../utils/requestDetailHelper')
 
 // lastUsedAt 更新节流（每账户 60 秒内最多更新一次，使用 LRU 防止内存泄漏）
 const lastUsedAtThrottle = new LRUCache(1000) // 最多缓存 1000 个账户
@@ -91,8 +95,30 @@ class OpenAIResponsesRelayService {
       req.once('close', handleClientDisconnect)
       res.once('close', handleClientDisconnect)
 
-      // 构建目标 URL
-      const targetUrl = `${fullAccount.baseApi}${req.path}`
+      // 构建目标 URL（根据 providerEndpoint 配置决定端点路径）
+      const providerEndpoint = fullAccount.providerEndpoint || 'responses'
+      let targetPath = req.path
+
+      // 根据 providerEndpoint 配置归一化路径
+      // 注意：unified.js 已将 /v1/chat/completions 的请求体转换为 Responses 格式，
+      // 因此这里只需归一化路径即可；反向 responses→completions 需要同时转换请求体，
+      // 目前不支持，所以只保留 responses 和 auto 两种模式
+      if (
+        providerEndpoint === 'responses' &&
+        (targetPath === '/v1/chat/completions' || targetPath === '/chat/completions')
+      ) {
+        const newPath = targetPath.startsWith('/v1') ? '/v1/responses' : '/responses'
+        logger.info(`📝 Normalized path (${req.path}) → ${newPath} (providerEndpoint=responses)`)
+        targetPath = newPath
+      }
+      // providerEndpoint === 'auto' 时保持原始路径不变
+
+      // 防止 baseApi 已含 /v1 时路径重复（如 baseApi=http://host/v1 + targetPath=/v1/responses → /v1/v1/responses）
+      const baseApi = fullAccount.baseApi || ''
+      if (baseApi.endsWith('/v1') && targetPath.startsWith('/v1/')) {
+        targetPath = targetPath.slice(3) // '/v1/responses' → '/responses'
+      }
+      const targetUrl = `${baseApi}${targetPath}`
       logger.info(`🎯 Forwarding to: ${targetUrl}`)
 
       // 构建请求头 - 使用统一的 headerFilter 移除 CDN headers
@@ -327,7 +353,7 @@ class OpenAIResponsesRelayService {
       }
 
       // 处理非流式响应
-      return this._handleNormalResponse(response, res, account, apiKeyData, req.body?.model)
+      return this._handleNormalResponse(response, res, account, apiKeyData, req.body?.model, req)
     } catch (error) {
       // 清理 AbortController
       if (abortController && !abortController.signal.aborted) {
@@ -571,7 +597,7 @@ class OpenAIResponsesRelayService {
           const outputTokens = usageData.output_tokens || usageData.completion_tokens || 0
 
           // 提取缓存相关的 tokens（如果存在）
-          const cacheReadTokens = usageData.input_tokens_details?.cached_tokens || 0
+          const cacheReadTokens = extractOpenAICacheReadTokens(usageData)
           const cacheCreateTokens = extractCacheCreationTokens(usageData)
           // 计算实际输入token（总输入减去缓存部分）
           const actualInputTokens = Math.max(0, totalInputTokens - cacheReadTokens)
@@ -580,6 +606,7 @@ class OpenAIResponsesRelayService {
             usageData.total_tokens || totalInputTokens + outputTokens + cacheCreateTokens
           const modelToRecord = actualModel || requestedModel || 'gpt-4'
 
+          const serviceTier = req._serviceTier || null
           await apiKeyService.recordUsage(
             apiKeyData.id,
             actualInputTokens, // 传递实际输入（不含缓存）
@@ -588,7 +615,13 @@ class OpenAIResponsesRelayService {
             cacheReadTokens,
             modelToRecord,
             account.id,
-            'openai-responses'
+            'openai-responses',
+            serviceTier,
+            createRequestDetailMeta(req, {
+              requestBody: req.body,
+              stream: true,
+              statusCode: res.statusCode
+            })
           )
 
           logger.info(
@@ -609,7 +642,8 @@ class OpenAIResponsesRelayService {
                 cache_creation_input_tokens: cacheCreateTokens,
                 cache_read_input_tokens: cacheReadTokens
               },
-              modelToRecord
+              modelToRecord,
+              serviceTier
             )
             await openaiResponsesAccountService.updateUsageQuota(account.id, costInfo.costs.total)
           }
@@ -684,7 +718,7 @@ class OpenAIResponsesRelayService {
   }
 
   // 处理非流式响应
-  async _handleNormalResponse(response, res, account, apiKeyData, requestedModel) {
+  async _handleNormalResponse(response, res, account, apiKeyData, requestedModel, req) {
     const responseData = response.data
 
     // 提取 usage 数据和实际 model
@@ -701,7 +735,7 @@ class OpenAIResponsesRelayService {
         const outputTokens = usageData.output_tokens || usageData.completion_tokens || 0
 
         // 提取缓存相关的 tokens（如果存在）
-        const cacheReadTokens = usageData.input_tokens_details?.cached_tokens || 0
+        const cacheReadTokens = extractOpenAICacheReadTokens(usageData)
         const cacheCreateTokens = extractCacheCreationTokens(usageData)
         // 计算实际输入token（总输入减去缓存部分）
         const actualInputTokens = Math.max(0, totalInputTokens - cacheReadTokens)
@@ -709,6 +743,7 @@ class OpenAIResponsesRelayService {
         const totalTokens =
           usageData.total_tokens || totalInputTokens + outputTokens + cacheCreateTokens
 
+        const serviceTier = req._serviceTier || null
         await apiKeyService.recordUsage(
           apiKeyData.id,
           actualInputTokens, // 传递实际输入（不含缓存）
@@ -717,7 +752,13 @@ class OpenAIResponsesRelayService {
           cacheReadTokens,
           actualModel,
           account.id,
-          'openai-responses'
+          'openai-responses',
+          serviceTier,
+          createRequestDetailMeta(req, {
+            requestBody: req?.body,
+            stream: false,
+            statusCode: response.status
+          })
         )
 
         logger.info(
@@ -738,7 +779,8 @@ class OpenAIResponsesRelayService {
               cache_creation_input_tokens: cacheCreateTokens,
               cache_read_input_tokens: cacheReadTokens
             },
-            actualModel
+            actualModel,
+            serviceTier
           )
           await openaiResponsesAccountService.updateUsageQuota(account.id, costInfo.costs.total)
         }

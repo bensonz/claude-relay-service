@@ -6,6 +6,7 @@ const bedrockAccountService = require('../../services/account/bedrockAccountServ
 const ccrAccountService = require('../../services/account/ccrAccountService')
 const geminiAccountService = require('../../services/account/geminiAccountService')
 const droidAccountService = require('../../services/account/droidAccountService')
+const grokAccountService = require('../../services/account/grokAccountService')
 const openaiResponsesAccountService = require('../../services/account/openaiResponsesAccountService')
 const redis = require('../../models/redis')
 const { authenticateAdmin } = require('../../middleware/auth')
@@ -37,6 +38,7 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
       ccrAccounts,
       openaiResponsesAccounts,
       droidAccounts,
+      grokAccounts,
       todayStats,
       systemAverages,
       realtimeMetrics
@@ -49,6 +51,7 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
       ccrAccountService.getAllAccounts(),
       openaiResponsesAccountService.getAllAccounts(true),
       droidAccountService.getAllAccounts(),
+      grokAccountService.getAllAccounts(true),
       redis.getTodayStats(),
       redis.getSystemAverages(),
       redis.getRealtimeSystemMetrics()
@@ -185,6 +188,7 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
     const openaiStats = countAccountStats(openaiAccounts, { isStringType: true })
     const ccrStats = countAccountStats(ccrAccounts)
     const openaiResponsesStats = countAccountStats(openaiResponsesAccounts, { isStringType: true })
+    const grokStats = countAccountStats(grokAccounts, { isStringType: true })
 
     const dashboard = {
       overview: {
@@ -198,7 +202,8 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
           bedrockAccounts.length +
           openaiAccounts.length +
           openaiResponsesAccounts.length +
-          ccrAccounts.length,
+          ccrAccounts.length +
+          grokAccounts.length,
         normalAccounts:
           claudeStats.normal +
           claudeConsoleStats.normal +
@@ -206,7 +211,8 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
           bedrockStats.normal +
           openaiStats.normal +
           openaiResponsesStats.normal +
-          ccrStats.normal,
+          ccrStats.normal +
+          grokStats.normal,
         abnormalAccounts:
           claudeStats.abnormal +
           claudeConsoleStats.abnormal +
@@ -215,6 +221,7 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
           openaiStats.abnormal +
           openaiResponsesStats.abnormal +
           ccrStats.abnormal +
+          grokStats.abnormal +
           abnormalDroidAccounts,
         pausedAccounts:
           claudeStats.paused +
@@ -224,6 +231,7 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
           openaiStats.paused +
           openaiResponsesStats.paused +
           ccrStats.paused +
+          grokStats.paused +
           pausedDroidAccounts,
         rateLimitedAccounts:
           claudeStats.rateLimited +
@@ -233,6 +241,7 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
           openaiStats.rateLimited +
           openaiResponsesStats.rateLimited +
           ccrStats.rateLimited +
+          grokStats.rateLimited +
           rateLimitedDroidAccounts,
         // 各平台详细统计
         accountsByPlatform: {
@@ -291,6 +300,13 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
             abnormal: abnormalDroidAccounts,
             paused: pausedDroidAccounts,
             rateLimited: rateLimitedDroidAccounts
+          },
+          grok: {
+            total: grokAccounts.length,
+            normal: grokStats.normal,
+            abnormal: grokStats.abnormal,
+            paused: grokStats.paused,
+            rateLimited: grokStats.rateLimited
           }
         },
         // 保留旧字段以兼容
@@ -302,6 +318,7 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
           openaiStats.normal +
           openaiResponsesStats.normal +
           ccrStats.normal +
+          grokStats.normal +
           normalDroidAccounts,
         totalClaudeAccounts: claudeAccounts.length + claudeConsoleAccounts.length,
         activeClaudeAccounts: claudeStats.normal + claudeConsoleStats.normal,
@@ -341,6 +358,7 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
         claudeAccountsHealthy: claudeStats.normal + claudeConsoleStats.normal > 0,
         geminiAccountsHealthy: geminiStats.normal > 0,
         droidAccountsHealthy: normalDroidAccounts > 0,
+        grokAccountsHealthy: grokStats.normal > 0,
         uptime: process.uptime()
       },
       systemTimezone: config.system.timezoneOffset || 8
@@ -484,7 +502,9 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
           outputTokens: 0,
           cacheCreateTokens: 0,
           cacheReadTokens: 0,
-          allTokens: 0
+          allTokens: 0,
+          ephemeral5mTokens: 0,
+          ephemeral1hTokens: 0
         }
 
         stats.requests += parseInt(data.requests) || 0
@@ -493,6 +513,8 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
         stats.cacheCreateTokens += parseInt(data.cacheCreateTokens) || 0
         stats.cacheReadTokens += parseInt(data.cacheReadTokens) || 0
         stats.allTokens += parseInt(data.allTokens) || 0
+        stats.ephemeral5mTokens += parseInt(data.ephemeral5mTokens) || 0
+        stats.ephemeral1hTokens += parseInt(data.ephemeral1hTokens) || 0
 
         modelStatsMap.set(normalizedModel, stats)
       }
@@ -507,6 +529,14 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
         output_tokens: stats.outputTokens,
         cache_creation_input_tokens: stats.cacheCreateTokens,
         cache_read_input_tokens: stats.cacheReadTokens
+      }
+
+      // 如果有 ephemeral 5m/1h 拆分数据，添加 cache_creation 子对象以实现精确计费
+      if (stats.ephemeral5mTokens > 0 || stats.ephemeral1hTokens > 0) {
+        usage.cache_creation = {
+          ephemeral_5m_input_tokens: stats.ephemeral5mTokens,
+          ephemeral_1h_input_tokens: stats.ephemeral1hTokens
+        }
       }
 
       // 计算费用

@@ -4,7 +4,10 @@ const config = require('../../config/config')
 const redis = require('../models/redis')
 const logger = require('../utils/logger')
 const serviceRatesService = require('./serviceRatesService')
-const { isOpusModel } = require('../utils/modelHelper')
+const requestDetailService = require('./requestDetailService')
+const { isClaudeFamilyModel } = require('../utils/modelHelper')
+const { finalizeRequestDetailMeta } = require('../utils/requestDetailHelper')
+const requestBodyRuleService = require('./requestBodyRuleService')
 
 const ACCOUNT_TYPE_CONFIG = {
   claude: { prefix: 'claude:account:' },
@@ -14,7 +17,8 @@ const ACCOUNT_TYPE_CONFIG = {
   'azure-openai': { prefix: 'azure_openai:account:' },
   gemini: { prefix: 'gemini_account:' },
   'gemini-api': { prefix: 'gemini_api_account:' },
-  droid: { prefix: 'droid:account:' }
+  droid: { prefix: 'droid:account:' },
+  grok: { prefix: 'grok_account:' }
 }
 
 const ACCOUNT_TYPE_PRIORITY = [
@@ -25,7 +29,8 @@ const ACCOUNT_TYPE_PRIORITY = [
   'claude-console',
   'gemini',
   'gemini-api',
-  'droid'
+  'droid',
+  'grok'
 ]
 
 const ACCOUNT_CATEGORY_MAP = {
@@ -36,7 +41,8 @@ const ACCOUNT_CATEGORY_MAP = {
   'azure-openai': 'openai',
   gemini: 'gemini',
   'gemini-api': 'gemini',
-  droid: 'droid'
+  droid: 'droid',
+  grok: 'grok'
 }
 
 /**
@@ -83,7 +89,7 @@ function normalizePermissions(permissions) {
 /**
  * 检查是否有访问特定服务的权限
  * @param {string|array} permissions - 权限数据
- * @param {string} service - 服务名称（claude/gemini/openai/droid）
+ * @param {string} service - 服务名称（claude/gemini/openai/droid/grok）
  * @returns {boolean} - 是否有权限
  */
 function hasPermission(permissions, service) {
@@ -124,6 +130,43 @@ function sanitizeAccountIdForType(accountId, accountType) {
   return accountId
 }
 
+function parseBooleanWithDefault(value, defaultValue = false) {
+  if (value === undefined || value === null || value === '') {
+    return defaultValue
+  }
+
+  if (typeof value === 'boolean') {
+    return value
+  }
+
+  if (typeof value === 'string') {
+    return value === 'true'
+  }
+
+  return Boolean(value)
+}
+
+function parseOpenAIResponsesPayloadRules(rawRules) {
+  if (rawRules === undefined || rawRules === null || rawRules === '') {
+    return []
+  }
+
+  let parsedRules = rawRules
+  if (typeof rawRules === 'string') {
+    try {
+      parsedRules = JSON.parse(rawRules)
+    } catch (error) {
+      return []
+    }
+  }
+
+  if (!Array.isArray(parsedRules)) {
+    return []
+  }
+
+  return parsedRules.map((rule) => requestBodyRuleService.normalizeRule(rule)).filter(Boolean)
+}
+
 class ApiKeyService {
   constructor() {
     this.prefix = config.security.apiKeyPrefix
@@ -143,6 +186,7 @@ class ApiKeyService {
       azureOpenaiAccountId = null,
       bedrockAccountId = null, // 添加 Bedrock 账号ID支持
       droidAccountId = null,
+      grokAccountId = null,
       permissions = [], // 数组格式，空数组表示全部服务，如 ['claude', 'gemini']
       isActive = true,
       concurrencyLimit = 0,
@@ -161,8 +205,20 @@ class ApiKeyService {
       activationUnit = 'days', // 新增：激活时间单位 'hours' 或 'days'
       expirationMode = 'fixed', // 新增：过期模式 'fixed'(固定时间) 或 'activation'(首次使用后激活)
       icon = '', // 新增：图标（base64编码）
-      serviceRates = {} // API Key 级别服务倍率覆盖
+      serviceRates = {}, // API Key 级别服务倍率覆盖
+      weeklyResetDay = 1, // 周费用重置日 (1=周一 ... 7=周日)
+      weeklyResetHour = 0, // 周费用重置时 (0-23)
+      enableOpenAIResponsesCodexAdaptation = true,
+      enableOpenAIResponsesPayloadRules = false,
+      openaiResponsesPayloadRules = []
     } = options
+
+    const payloadRulesValidation = requestBodyRuleService.validateAndNormalizeRules(
+      openaiResponsesPayloadRules
+    )
+    if (!payloadRulesValidation.valid) {
+      throw new Error(payloadRulesValidation.error)
+    }
 
     // 生成简单的API Key (64字符十六进制)
     const apiKey = `${this.prefix}${this._generateSecretKey()}`
@@ -190,6 +246,7 @@ class ApiKeyService {
       azureOpenaiAccountId: azureOpenaiAccountId || '',
       bedrockAccountId: bedrockAccountId || '', // 添加 Bedrock 账号ID
       droidAccountId: droidAccountId || '',
+      grokAccountId: grokAccountId || '',
       permissions: JSON.stringify(normalizePermissions(permissions)),
       enableModelRestriction: String(enableModelRestriction),
       restrictedModels: JSON.stringify(restrictedModels || []),
@@ -211,7 +268,12 @@ class ApiKeyService {
       userId: options.userId || '',
       userUsername: options.userUsername || '',
       icon: icon || '', // 新增：图标（base64编码）
-      serviceRates: JSON.stringify(serviceRates || {}) // API Key 级别服务倍率
+      serviceRates: JSON.stringify(serviceRates || {}), // API Key 级别服务倍率
+      weeklyResetDay: String(weeklyResetDay || 1), // 周费用重置日 (1-7)
+      weeklyResetHour: String(weeklyResetHour || 0), // 周费用重置时 (0-23)
+      enableOpenAIResponsesCodexAdaptation: String(enableOpenAIResponsesCodexAdaptation !== false),
+      enableOpenAIResponsesPayloadRules: String(enableOpenAIResponsesPayloadRules === true),
+      openaiResponsesPayloadRules: JSON.stringify(payloadRulesValidation.rules)
     }
 
     // 保存API Key数据并建立哈希映射
@@ -261,6 +323,7 @@ class ApiKeyService {
       azureOpenaiAccountId: keyData.azureOpenaiAccountId,
       bedrockAccountId: keyData.bedrockAccountId, // 添加 Bedrock 账号ID
       droidAccountId: keyData.droidAccountId,
+      grokAccountId: keyData.grokAccountId,
       permissions: normalizePermissions(keyData.permissions),
       enableModelRestriction: keyData.enableModelRestriction === 'true',
       restrictedModels: JSON.parse(keyData.restrictedModels),
@@ -278,7 +341,18 @@ class ApiKeyService {
       createdAt: keyData.createdAt,
       expiresAt: keyData.expiresAt,
       createdBy: keyData.createdBy,
-      serviceRates: JSON.parse(keyData.serviceRates || '{}') // API Key 级别服务倍率
+      serviceRates: JSON.parse(keyData.serviceRates || '{}'), // API Key 级别服务倍率
+      enableOpenAIResponsesCodexAdaptation: parseBooleanWithDefault(
+        keyData.enableOpenAIResponsesCodexAdaptation,
+        true
+      ),
+      enableOpenAIResponsesPayloadRules: parseBooleanWithDefault(
+        keyData.enableOpenAIResponsesPayloadRules,
+        false
+      ),
+      openaiResponsesPayloadRules: parseOpenAIResponsesPayloadRules(
+        keyData.openaiResponsesPayloadRules
+      )
     }
   }
 
@@ -373,8 +447,12 @@ class ApiKeyService {
         costQueries.push(redis.getCostStats(keyData.id).then((v) => ({ totalCost: v?.total || 0 })))
       }
       if (weeklyOpusCostLimit > 0) {
+        const resetDay = parseInt(keyData.weeklyResetDay || 1)
+        const resetHour = parseInt(keyData.weeklyResetHour || 0)
         costQueries.push(
-          redis.getWeeklyOpusCost(keyData.id).then((v) => ({ weeklyOpusCost: v || 0 }))
+          redis
+            .getWeeklyOpusCost(keyData.id, resetDay, resetHour)
+            .then((v) => ({ weeklyOpusCost: v || 0 }))
         )
       }
 
@@ -418,6 +496,18 @@ class ApiKeyService {
         // 解析失败使用默认值
       }
 
+      const openaiResponsesPayloadRules = parseOpenAIResponsesPayloadRules(
+        keyData.openaiResponsesPayloadRules
+      )
+      const enableOpenAIResponsesCodexAdaptation = parseBooleanWithDefault(
+        keyData.enableOpenAIResponsesCodexAdaptation,
+        true
+      )
+      const enableOpenAIResponsesPayloadRules = parseBooleanWithDefault(
+        keyData.enableOpenAIResponsesPayloadRules,
+        false
+      )
+
       return {
         valid: true,
         keyData: {
@@ -433,6 +523,7 @@ class ApiKeyService {
           azureOpenaiAccountId: keyData.azureOpenaiAccountId,
           bedrockAccountId: keyData.bedrockAccountId, // 添加 Bedrock 账号ID
           droidAccountId: keyData.droidAccountId,
+          grokAccountId: keyData.grokAccountId,
           permissions: normalizePermissions(keyData.permissions),
           tokenLimit: parseInt(keyData.tokenLimit),
           concurrencyLimit: parseInt(keyData.concurrencyLimit || 0),
@@ -449,8 +540,13 @@ class ApiKeyService {
           dailyCost: costData.dailyCost || 0,
           totalCost: costData.totalCost || 0,
           weeklyOpusCost: costData.weeklyOpusCost || 0,
+          weeklyResetDay: parseInt(keyData.weeklyResetDay || 1),
+          weeklyResetHour: parseInt(keyData.weeklyResetHour || 0),
           tags,
-          serviceRates
+          serviceRates,
+          enableOpenAIResponsesCodexAdaptation,
+          enableOpenAIResponsesPayloadRules,
+          openaiResponsesPayloadRules
         }
       }
     } catch (error) {
@@ -541,6 +637,18 @@ class ApiKeyService {
         tags = []
       }
 
+      const openaiResponsesPayloadRules = parseOpenAIResponsesPayloadRules(
+        keyData.openaiResponsesPayloadRules
+      )
+      const enableOpenAIResponsesCodexAdaptation = parseBooleanWithDefault(
+        keyData.enableOpenAIResponsesCodexAdaptation,
+        true
+      )
+      const enableOpenAIResponsesPayloadRules = parseBooleanWithDefault(
+        keyData.enableOpenAIResponsesPayloadRules,
+        false
+      )
+
       return {
         valid: true,
         keyData: {
@@ -562,6 +670,7 @@ class ApiKeyService {
           azureOpenaiAccountId: keyData.azureOpenaiAccountId,
           bedrockAccountId: keyData.bedrockAccountId,
           droidAccountId: keyData.droidAccountId,
+          grokAccountId: keyData.grokAccountId,
           permissions: normalizePermissions(keyData.permissions),
           tokenLimit: parseInt(keyData.tokenLimit),
           concurrencyLimit: parseInt(keyData.concurrencyLimit || 0),
@@ -577,9 +686,17 @@ class ApiKeyService {
           weeklyOpusCostLimit: parseFloat(keyData.weeklyOpusCostLimit || 0),
           dailyCost: dailyCost || 0,
           totalCost: costStats?.total || 0,
-          weeklyOpusCost: (await redis.getWeeklyOpusCost(keyData.id)) || 0,
+          weeklyOpusCost:
+            (await redis.getWeeklyOpusCost(
+              keyData.id,
+              parseInt(keyData.weeklyResetDay || 1),
+              parseInt(keyData.weeklyResetHour || 0)
+            )) || 0,
           tags,
-          usage
+          usage,
+          enableOpenAIResponsesCodexAdaptation,
+          enableOpenAIResponsesPayloadRules,
+          openaiResponsesPayloadRules
         }
       }
     } catch (error) {
@@ -778,12 +895,25 @@ class ApiKeyService {
         key.isActive = key.isActive === 'true'
         key.enableModelRestriction = key.enableModelRestriction === 'true'
         key.enableClientRestriction = key.enableClientRestriction === 'true'
+        key.enableOpenAIResponsesCodexAdaptation = parseBooleanWithDefault(
+          key.enableOpenAIResponsesCodexAdaptation,
+          true
+        )
+        key.enableOpenAIResponsesPayloadRules = parseBooleanWithDefault(
+          key.enableOpenAIResponsesPayloadRules,
+          false
+        )
         key.permissions = normalizePermissions(key.permissions)
         key.dailyCostLimit = parseFloat(key.dailyCostLimit || 0)
         key.totalCostLimit = parseFloat(key.totalCostLimit || 0)
         key.weeklyOpusCostLimit = parseFloat(key.weeklyOpusCostLimit || 0)
         key.dailyCost = (await redis.getDailyCost(key.id)) || 0
-        key.weeklyOpusCost = (await redis.getWeeklyOpusCost(key.id)) || 0
+        key.weeklyOpusCost =
+          (await redis.getWeeklyOpusCost(
+            key.id,
+            parseInt(key.weeklyResetDay || 1),
+            parseInt(key.weeklyResetHour || 0)
+          )) || 0
         key.activationDays = parseInt(key.activationDays || 0)
         key.activationUnit = key.activationUnit || 'days'
         key.expirationMode = key.expirationMode || 'fixed'
@@ -854,6 +984,9 @@ class ApiKeyService {
         } catch (e) {
           key.tags = []
         }
+        key.openaiResponsesPayloadRules = parseOpenAIResponsesPayloadRules(
+          key.openaiResponsesPayloadRules
+        )
         // 不暴露已弃用字段
         if (Object.prototype.hasOwnProperty.call(key, 'ccrAccountId')) {
           delete key.ccrAccountId
@@ -1026,6 +1159,14 @@ class ApiKeyService {
           key.enableModelRestriction === 'true' || key.enableModelRestriction === true
         key.enableClientRestriction =
           key.enableClientRestriction === 'true' || key.enableClientRestriction === true
+        key.enableOpenAIResponsesCodexAdaptation = parseBooleanWithDefault(
+          key.enableOpenAIResponsesCodexAdaptation,
+          true
+        )
+        key.enableOpenAIResponsesPayloadRules = parseBooleanWithDefault(
+          key.enableOpenAIResponsesPayloadRules,
+          false
+        )
         key.isActivated = key.isActivated === 'true' || key.isActivated === true
         key.permissions = key.permissions || 'all'
         key.activationUnit = key.activationUnit || 'days'
@@ -1104,6 +1245,15 @@ class ApiKeyService {
         } else {
           key.tags = []
         }
+        if (Array.isArray(key.openaiResponsesPayloadRules)) {
+          // 已解析，保持不变
+        } else if (key.openaiResponsesPayloadRules) {
+          key.openaiResponsesPayloadRules = parseOpenAIResponsesPayloadRules(
+            key.openaiResponsesPayloadRules
+          )
+        } else {
+          key.openaiResponsesPayloadRules = []
+        }
 
         // 生成掩码key后再清理敏感字段
         if (key.apiKey) {
@@ -1145,6 +1295,7 @@ class ApiKeyService {
           'geminiAccountId',
           'openaiAccountId',
           'droidAccountId',
+          'grokAccountId',
           'isDeleted'
         )
       }
@@ -1162,7 +1313,8 @@ class ApiKeyService {
             geminiAccountId: fields[1] || null,
             openaiAccountId: fields[2] || null,
             droidAccountId: fields[3] || null,
-            isDeleted: fields[4] === 'true'
+            grokAccountId: fields[4] || null,
+            isDeleted: fields[5] === 'true'
           }
         })
         .filter((k) => k && !k.isDeleted)
@@ -1197,6 +1349,7 @@ class ApiKeyService {
         'azureOpenaiAccountId',
         'bedrockAccountId', // 添加 Bedrock 账号ID
         'droidAccountId',
+        'grokAccountId',
         'permissions',
         'expiresAt',
         'activationDays', // 新增：激活后有效天数
@@ -1215,7 +1368,12 @@ class ApiKeyService {
         'userId', // 新增：用户ID（所有者变更）
         'userUsername', // 新增：用户名（所有者变更）
         'createdBy', // 新增：创建者（所有者变更）
-        'serviceRates' // API Key 级别服务倍率
+        'serviceRates', // API Key 级别服务倍率
+        'weeklyResetDay', // 周费用重置日 (1-7)
+        'weeklyResetHour', // 周费用重置时 (0-23)
+        'enableOpenAIResponsesCodexAdaptation',
+        'enableOpenAIResponsesPayloadRules',
+        'openaiResponsesPayloadRules'
       ]
       const updatedData = { ...keyData }
 
@@ -1225,7 +1383,8 @@ class ApiKeyService {
             field === 'restrictedModels' ||
             field === 'allowedClients' ||
             field === 'tags' ||
-            field === 'serviceRates'
+            field === 'serviceRates' ||
+            field === 'openaiResponsesPayloadRules'
           ) {
             // 特殊处理数组/对象字段
             updatedData[field] = JSON.stringify(value || (field === 'serviceRates' ? {} : []))
@@ -1235,7 +1394,9 @@ class ApiKeyService {
           } else if (
             field === 'enableModelRestriction' ||
             field === 'enableClientRestriction' ||
-            field === 'isActivated'
+            field === 'isActivated' ||
+            field === 'enableOpenAIResponsesCodexAdaptation' ||
+            field === 'enableOpenAIResponsesPayloadRules'
           ) {
             // 布尔值转字符串
             updatedData[field] = String(value)
@@ -1513,9 +1674,12 @@ class ApiKeyService {
     cacheReadTokens = 0,
     model = 'unknown',
     accountId = null,
-    accountType = null
+    accountType = null,
+    serviceTier = null,
+    requestMeta = null
   ) {
     try {
+      const finalizedRequestMeta = finalizeRequestDetailMeta(requestMeta)
       const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
 
       // 计算费用
@@ -1527,7 +1691,8 @@ class ApiKeyService {
           cache_creation_input_tokens: cacheCreateTokens,
           cache_read_input_tokens: cacheReadTokens
         },
-        model
+        model,
+        serviceTier
       )
 
       // 检查是否为 1M 上下文请求
@@ -1599,6 +1764,8 @@ class ApiKeyService {
             outputTokens,
             cacheCreateTokens,
             cacheReadTokens,
+            0, // ephemeral5mTokens - recordUsage 不含详细缓存数据
+            0, // ephemeral1hTokens - recordUsage 不含详细缓存数据
             model,
             isLongContextRequest
           )
@@ -1613,11 +1780,17 @@ class ApiKeyService {
       }
 
       // 记录单次请求的使用详情（同时保存真实成本和倍率成本）
-      await redis.addUsageRecord(keyId, {
+      const usageRecord = {
         timestamp: new Date().toISOString(),
         model,
         accountId: accountId || null,
         accountType: accountType || null,
+        requestId: finalizedRequestMeta?.requestId || null,
+        endpoint: finalizedRequestMeta?.endpoint || null,
+        method: finalizedRequestMeta?.method || null,
+        statusCode: finalizedRequestMeta?.statusCode || null,
+        stream: finalizedRequestMeta?.stream === true,
+        durationMs: finalizedRequestMeta?.durationMs ?? null,
         inputTokens,
         outputTokens,
         cacheCreateTokens,
@@ -1625,7 +1798,14 @@ class ApiKeyService {
         totalTokens,
         cost: Number(ratedCost.toFixed(6)),
         realCost: Number(realCost.toFixed(6)),
-        realCostBreakdown: costInfo && costInfo.costs ? costInfo.costs : undefined
+        costBreakdown: costInfo?.costs || undefined,
+        realCostBreakdown: costInfo?.costs || undefined,
+        isLongContext: isLongContextRequest
+      }
+
+      await redis.addUsageRecord(keyId, usageRecord)
+      this._captureRequestDetail(keyId, usageRecord, finalizedRequestMeta).catch((captureError) => {
+        logger.warn(`⚠️ Failed to schedule request detail capture: ${captureError.message}`)
       })
 
       const logParts = [`Model: ${model}`, `Input: ${inputTokens}`, `Output: ${outputTokens}`]
@@ -1638,18 +1818,21 @@ class ApiKeyService {
       logParts.push(`Total: ${totalTokens} tokens`)
 
       logger.database(`📊 Recorded usage: ${keyId} - ${logParts.join(', ')}`)
+
+      return { realCost, ratedCost }
     } catch (error) {
       logger.error('❌ Failed to record usage:', error)
+      return { realCost: 0, ratedCost: 0 }
     }
   }
 
-  // 📊 记录 Opus 模型费用（仅限 claude 和 claude-console 账户）
+  // 📊 记录 Opus 模型费用（仅限 claude 和 claude-console 账户，支持自定义重置周期）
   // ratedCost: 倍率后的成本（用于限额校验）
   // realCost: 真实成本（用于对账），如果不传则等于 ratedCost
   async recordOpusCost(keyId, ratedCost, realCost, model, accountType) {
     try {
       // 判断是否为 Claude 系列模型（包含 Bedrock 格式等）
-      if (!isOpusModel(model)) {
+      if (!isClaudeFamilyModel(model)) {
         return
       }
 
@@ -1660,8 +1843,13 @@ class ApiKeyService {
         return // 不是 claude 账户，直接返回
       }
 
+      // 获取 key 的重置配置
+      const keyData = await redis.getApiKey(keyId)
+      const resetDay = parseInt(keyData?.weeklyResetDay || 1)
+      const resetHour = parseInt(keyData?.weeklyResetHour || 0)
+
       // 记录 Opus 周费用（倍率成本和真实成本）
-      await redis.incrementWeeklyOpusCost(keyId, ratedCost, realCost)
+      await redis.incrementWeeklyOpusCost(keyId, ratedCost, realCost, resetDay, resetHour)
       logger.database(
         `💰 Recorded Opus weekly cost for ${keyId}: rated=$${ratedCost.toFixed(6)}, real=$${realCost.toFixed(6)}, model: ${model}`
       )
@@ -1676,9 +1864,11 @@ class ApiKeyService {
     usageObject,
     model = 'unknown',
     accountId = null,
-    accountType = null
+    accountType = null,
+    requestMeta = null
   ) {
     try {
+      const finalizedRequestMeta = finalizeRequestDetailMeta(requestMeta)
       // 提取 token 数量
       const inputTokens = usageObject.input_tokens || 0
       const outputTokens = usageObject.output_tokens || 0
@@ -1687,56 +1877,50 @@ class ApiKeyService {
 
       const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
 
-      // 计算费用（支持详细的缓存类型）- 添加错误处理
-      let costInfo = { totalCost: 0, ephemeral5mCost: 0, ephemeral1hCost: 0 }
+      // 计算费用统一走 CostCalculator，缺少动态价格时使用内置 unknown fallback。
+      let costInfo = {
+        totalCost: 0,
+        inputCost: 0,
+        outputCost: 0,
+        cacheCreateCost: 0,
+        cacheReadCost: 0,
+        ephemeral5mCost: 0,
+        ephemeral1hCost: 0,
+        isLongContextRequest: false,
+        usedFallbackPricing: false,
+        pricingSource: null
+      }
       try {
-        const pricingService = require('./pricingService')
-        // 确保 pricingService 已初始化
-        if (!pricingService.pricingData) {
-          logger.warn('⚠️ PricingService not initialized, initializing now...')
-          await pricingService.initialize()
-        }
-        costInfo = pricingService.calculateCost(usageObject, model)
+        const CostCalculator = require('../utils/costCalculator')
+        const calculatedCost = CostCalculator.calculateCost(usageObject, model)
+        const costs = calculatedCost?.costs || {}
+        const totalCost = Number(costs.total ?? calculatedCost?.totalCost ?? 0)
 
-        // 验证计算结果
-        if (!costInfo || typeof costInfo.totalCost !== 'number') {
-          logger.error(`❌ Invalid cost calculation result for model ${model}:`, costInfo)
-          // 使用 CostCalculator 作为后备
-          const CostCalculator = require('../utils/costCalculator')
-          const fallbackCost = CostCalculator.calculateCost(usageObject, model)
-          if (fallbackCost && fallbackCost.costs && fallbackCost.costs.total > 0) {
-            logger.warn(
-              `⚠️ Using fallback cost calculation for ${model}: $${fallbackCost.costs.total}`
-            )
-            costInfo = {
-              totalCost: fallbackCost.costs.total,
-              ephemeral5mCost: 0,
-              ephemeral1hCost: 0
-            }
-          } else {
-            costInfo = { totalCost: 0, ephemeral5mCost: 0, ephemeral1hCost: 0 }
-          }
+        if (!Number.isFinite(totalCost)) {
+          throw new Error(`Invalid cost calculation result for model ${model}`)
+        }
+
+        costInfo = {
+          totalCost,
+          inputCost: Number(costs.input ?? calculatedCost?.inputCost ?? 0) || 0,
+          outputCost: Number(costs.output ?? calculatedCost?.outputCost ?? 0) || 0,
+          cacheCreateCost:
+            Number(costs.cacheCreate ?? costs.cacheWrite ?? calculatedCost?.cacheCreateCost ?? 0) ||
+            0,
+          cacheReadCost: Number(costs.cacheRead ?? calculatedCost?.cacheReadCost ?? 0) || 0,
+          ephemeral5mCost: Number(costs.ephemeral5m ?? calculatedCost?.ephemeral5mCost ?? 0) || 0,
+          ephemeral1hCost: Number(costs.ephemeral1h ?? calculatedCost?.ephemeral1hCost ?? 0) || 0,
+          isLongContextRequest:
+            calculatedCost?.isLongContextRequest === true ||
+            calculatedCost?.debug?.isLongContextRequest === true,
+          usedFallbackPricing: calculatedCost?.debug?.usedFallbackPricing === true,
+          pricingSource:
+            calculatedCost?.debug?.pricingSource ||
+            (calculatedCost?.usingDynamicPricing ? 'dynamic' : 'unknown-fallback')
         }
       } catch (pricingError) {
         logger.error(`❌ Failed to calculate cost for model ${model}:`, pricingError)
         logger.error(`   Usage object:`, JSON.stringify(usageObject))
-        // 使用 CostCalculator 作为后备
-        try {
-          const CostCalculator = require('../utils/costCalculator')
-          const fallbackCost = CostCalculator.calculateCost(usageObject, model)
-          if (fallbackCost && fallbackCost.costs && fallbackCost.costs.total > 0) {
-            logger.warn(
-              `⚠️ Using fallback cost calculation for ${model}: $${fallbackCost.costs.total}`
-            )
-            costInfo = {
-              totalCost: fallbackCost.costs.total,
-              ephemeral5mCost: 0,
-              ephemeral1hCost: 0
-            }
-          }
-        } catch (fallbackError) {
-          logger.error(`❌ Fallback cost calculation also failed:`, fallbackError)
-        }
       }
 
       // 提取详细的缓存创建数据
@@ -1834,6 +2018,8 @@ class ApiKeyService {
             outputTokens,
             cacheCreateTokens,
             cacheReadTokens,
+            ephemeral5mTokens,
+            ephemeral1hTokens,
             model,
             costInfo.isLongContextRequest || false
           )
@@ -1852,6 +2038,12 @@ class ApiKeyService {
         model,
         accountId: accountId || null,
         accountType: accountType || null,
+        requestId: finalizedRequestMeta?.requestId || null,
+        endpoint: finalizedRequestMeta?.endpoint || null,
+        method: finalizedRequestMeta?.method || null,
+        statusCode: finalizedRequestMeta?.statusCode || null,
+        stream: finalizedRequestMeta?.stream === true,
+        durationMs: finalizedRequestMeta?.durationMs ?? null,
         inputTokens,
         outputTokens,
         cacheCreateTokens,
@@ -1861,18 +2053,33 @@ class ApiKeyService {
         totalTokens,
         cost: Number(ratedCostWithDetails.toFixed(6)),
         realCost: Number(realCostWithDetails.toFixed(6)),
+        costBreakdown: {
+          input: costInfo.inputCost || 0,
+          output: costInfo.outputCost || 0,
+          cacheCreate: costInfo.cacheCreateCost || 0,
+          cacheRead: costInfo.cacheReadCost || 0,
+          ephemeral5m: costInfo.ephemeral5mCost || 0,
+          ephemeral1h: costInfo.ephemeral1hCost || 0,
+          total: realCostWithDetails
+        },
         realCostBreakdown: {
           input: costInfo.inputCost || 0,
           output: costInfo.outputCost || 0,
           cacheCreate: costInfo.cacheCreateCost || 0,
           cacheRead: costInfo.cacheReadCost || 0,
           ephemeral5m: costInfo.ephemeral5mCost || 0,
-          ephemeral1h: costInfo.ephemeral1hCost || 0
+          ephemeral1h: costInfo.ephemeral1hCost || 0,
+          total: realCostWithDetails
         },
+        pricingSource: costInfo.pricingSource || null,
+        usedFallbackPricing: costInfo.usedFallbackPricing === true,
         isLongContext: costInfo.isLongContextRequest || false
       }
 
       await redis.addUsageRecord(keyId, usageRecord)
+      this._captureRequestDetail(keyId, usageRecord, finalizedRequestMeta).catch((captureError) => {
+        logger.warn(`⚠️ Failed to schedule request detail capture: ${captureError.message}`)
+      })
 
       const logParts = [`Model: ${model}`, `Input: ${inputTokens}`, `Output: ${outputTokens}`]
       if (cacheCreateTokens > 0) {
@@ -1927,9 +2134,47 @@ class ApiKeyService {
         // 发布失败不影响主流程，只记录错误
         logger.warn('⚠️ Failed to publish billing event:', err.message)
       })
+
+      return { realCost: realCostWithDetails, ratedCost: ratedCostWithDetails }
     } catch (error) {
       logger.error('❌ Failed to record usage:', error)
+      return { realCost: 0, ratedCost: 0 }
     }
+  }
+
+  async _captureRequestDetail(keyId, usageRecord, requestMeta = null) {
+    if (!usageRecord) {
+      return
+    }
+
+    await requestDetailService.captureRequestDetail({
+      requestId: requestMeta?.requestId || usageRecord.requestId || null,
+      timestamp: usageRecord.timestamp,
+      requestStartedAt: requestMeta?.requestStartedAt || null,
+      endpoint: requestMeta?.endpoint || usageRecord.endpoint || null,
+      method: requestMeta?.method || usageRecord.method || null,
+      statusCode: requestMeta?.statusCode ?? usageRecord.statusCode ?? 200,
+      stream: requestMeta?.stream === true || usageRecord.stream === true,
+      durationMs: requestMeta?.durationMs ?? usageRecord.durationMs ?? null,
+      requestBody: requestMeta?.requestBody,
+      apiKeyId: keyId,
+      accountId: usageRecord.accountId || null,
+      accountType: usageRecord.accountType || null,
+      model: usageRecord.model || 'unknown',
+      inputTokens: usageRecord.inputTokens || 0,
+      outputTokens: usageRecord.outputTokens || 0,
+      cacheReadTokens: usageRecord.cacheReadTokens || 0,
+      cacheCreateTokens: usageRecord.cacheCreateTokens || 0,
+      totalTokens: usageRecord.totalTokens || 0,
+      cost: usageRecord.cost || 0,
+      realCost: usageRecord.realCost || usageRecord.cost || 0,
+      costBreakdown: usageRecord.costBreakdown || null,
+      realCostBreakdown: usageRecord.realCostBreakdown || usageRecord.costBreakdown || null,
+      pricingSource: usageRecord.pricingSource || null,
+      usedFallbackPricing: usageRecord.usedFallbackPricing === true,
+      isLongContextRequest:
+        usageRecord.isLongContext === true || usageRecord.isLongContextRequest === true
+    })
   }
 
   async _fetchAccountInfo(accountId, accountType, cache, client) {
@@ -2168,6 +2413,7 @@ class ApiKeyService {
           userUsername: key.userUsername,
           createdBy: key.createdBy,
           droidAccountId: key.droidAccountId,
+          grokAccountId: key.grokAccountId,
           // Include deletion fields for deleted keys
           isDeleted: key.isDeleted,
           deletedAt: key.deletedAt,
@@ -2219,8 +2465,20 @@ class ApiKeyService {
         openaiAccountId: keyData.openaiAccountId,
         bedrockAccountId: keyData.bedrockAccountId,
         droidAccountId: keyData.droidAccountId,
+        grokAccountId: keyData.grokAccountId,
         azureOpenaiAccountId: keyData.azureOpenaiAccountId,
-        ccrAccountId: keyData.ccrAccountId
+        ccrAccountId: keyData.ccrAccountId,
+        enableOpenAIResponsesCodexAdaptation: parseBooleanWithDefault(
+          keyData.enableOpenAIResponsesCodexAdaptation,
+          true
+        ),
+        enableOpenAIResponsesPayloadRules: parseBooleanWithDefault(
+          keyData.enableOpenAIResponsesPayloadRules,
+          false
+        ),
+        openaiResponsesPayloadRules: parseOpenAIResponsesPayloadRules(
+          keyData.openaiResponsesPayloadRules
+        )
       }
     } catch (error) {
       logger.error('❌ Failed to get API key by ID:', error)
@@ -2369,6 +2627,7 @@ class ApiKeyService {
         azure_openai: 'azureOpenaiAccountId',
         bedrock: 'bedrockAccountId',
         droid: 'droidAccountId',
+        grok: 'grokAccountId',
         ccr: null // CCR 账号没有对应的 API Key 字段
       }
 

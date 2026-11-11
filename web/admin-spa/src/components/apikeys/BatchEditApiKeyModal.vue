@@ -246,8 +246,45 @@
               type="number"
             />
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              设置 Claude 模型的周费用限制（周一到周日），仅对 Claude 模型请求生效
+              设置 Claude 模型的周费用限制，仅对 Claude 模型请求生效
             </p>
+            <div
+              v-if="form.weeklyOpusCostLimit && Number(form.weeklyOpusCostLimit) > 0"
+              class="mt-2 flex gap-3"
+            >
+              <div class="flex-1">
+                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400"
+                  >重置日</label
+                >
+                <select
+                  v-model="form.weeklyResetDay"
+                  class="form-input w-full border-gray-300 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                >
+                  <option value="">不修改</option>
+                  <option :value="1">周一</option>
+                  <option :value="2">周二</option>
+                  <option :value="3">周三</option>
+                  <option :value="4">周四</option>
+                  <option :value="5">周五</option>
+                  <option :value="6">周六</option>
+                  <option :value="7">周日</option>
+                </select>
+              </div>
+              <div class="flex-1">
+                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400"
+                  >重置时间 (UTC+8)</label
+                >
+                <select
+                  v-model="form.weeklyResetHour"
+                  class="form-input w-full border-gray-300 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                >
+                  <option value="">不修改</option>
+                  <option v-for="h in 24" :key="h - 1" :value="h - 1">
+                    {{ String(h - 1).padStart(2, '0') }}:00
+                  </option>
+                </select>
+              </div>
+            </div>
           </div>
 
           <!-- 并发限制 -->
@@ -314,6 +351,10 @@
               <label class="flex cursor-pointer items-center">
                 <input v-model="form.permissions" class="mr-2" type="radio" value="droid" />
                 <span class="text-sm text-gray-700">仅 Droid</span>
+              </label>
+              <label class="flex cursor-pointer items-center">
+                <input v-model="form.permissions" class="mr-2" type="radio" value="grok" />
+                <span class="text-sm text-gray-700">仅 Grok</span>
               </label>
             </div>
           </div>
@@ -417,6 +458,21 @@
                   :special-options="accountSpecialOptions"
                 />
               </div>
+              <div>
+                <label class="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-400"
+                  >Grok 专属账号</label
+                >
+                <AccountSelector
+                  v-model="grokAccountSelectorValue"
+                  :accounts="localAccounts.grok"
+                  default-option-text="请选择Grok账号"
+                  :disabled="!isServiceSelectable('grok')"
+                  :groups="localAccounts.grokGroups"
+                  placeholder="请选择Grok账号"
+                  platform="grok"
+                  :special-options="accountSpecialOptions"
+                />
+              </div>
             </div>
           </div>
 
@@ -484,10 +540,12 @@ const localAccounts = ref({
   openai: [],
   bedrock: [],
   droid: [],
+  grok: [],
   claudeGroups: [],
   geminiGroups: [],
   openaiGroups: [],
-  droidGroups: []
+  droidGroups: [],
+  grokGroups: []
 })
 
 // 标签相关
@@ -511,12 +569,15 @@ const form = reactive({
   dailyCostLimit: '',
   totalCostLimit: '',
   weeklyOpusCostLimit: '', // 新增Claude周费用限制
+  weeklyResetDay: '',
+  weeklyResetHour: '',
   permissions: '', // 空字符串表示不修改
   claudeAccountId: '',
   geminiAccountId: '',
   openaiAccountId: '',
   bedrockAccountId: '',
   droidAccountId: '',
+  grokAccountId: '',
   tags: [],
   isActive: null // null表示不修改
 })
@@ -545,6 +606,7 @@ const geminiAccountSelectorValue = createAccountSelectorModel('geminiAccountId')
 const openaiAccountSelectorValue = createAccountSelectorModel('openaiAccountId')
 const bedrockAccountSelectorValue = createAccountSelectorModel('bedrockAccountId')
 const droidAccountSelectorValue = createAccountSelectorModel('droidAccountId')
+const grokAccountSelectorValue = createAccountSelectorModel('grokAccountId')
 
 const isServiceSelectable = (service) => {
   if (!form.permissions) return true
@@ -588,6 +650,7 @@ const refreshAccounts = async () => {
       openaiResponsesData,
       bedrockData,
       droidData,
+      grokData,
       groupsData
     ] = await Promise.all([
       httpApis.getClaudeAccountsApi(),
@@ -598,6 +661,7 @@ const refreshAccounts = async () => {
       httpApis.getOpenAIResponsesAccountsApi(),
       httpApis.getBedrockAccountsApi(),
       httpApis.getDroidAccountsApi(),
+      httpApis.getGrokAccountsApi(),
       httpApis.getAccountGroupsApi()
     ])
 
@@ -690,6 +754,14 @@ const refreshAccounts = async () => {
       }))
     }
 
+    if (grokData.success) {
+      localAccounts.value.grok = (grokData.data || []).map((account) => ({
+        ...account,
+        platform: 'grok',
+        isDedicated: account.accountType === 'dedicated'
+      }))
+    }
+
     // 处理分组数据
     if (groupsData.success) {
       const allGroups = groupsData.data || []
@@ -697,6 +769,7 @@ const refreshAccounts = async () => {
       localAccounts.value.geminiGroups = allGroups.filter((g) => g.platform === 'gemini')
       localAccounts.value.openaiGroups = allGroups.filter((g) => g.platform === 'openai')
       localAccounts.value.droidGroups = allGroups.filter((g) => g.platform === 'droid')
+      localAccounts.value.grokGroups = allGroups.filter((g) => g.platform === 'grok')
     }
 
     showToast('账号列表已刷新', 'success')
@@ -736,6 +809,12 @@ const batchUpdateApiKeys = async () => {
     }
     if (form.weeklyOpusCostLimit !== '' && form.weeklyOpusCostLimit !== null) {
       updates.weeklyOpusCostLimit = parseFloat(form.weeklyOpusCostLimit)
+    }
+    if (form.weeklyResetDay !== '' && form.weeklyResetDay !== null) {
+      updates.weeklyResetDay = Number(form.weeklyResetDay)
+    }
+    if (form.weeklyResetHour !== '' && form.weeklyResetHour !== null) {
+      updates.weeklyResetHour = Number(form.weeklyResetHour)
     }
 
     // 权限设置
@@ -789,6 +868,14 @@ const batchUpdateApiKeys = async () => {
         updates.droidAccountId = null
       } else {
         updates.droidAccountId = form.droidAccountId
+      }
+    }
+
+    if (form.grokAccountId !== '') {
+      if (form.grokAccountId === 'SHARED_POOL') {
+        updates.grokAccountId = null
+      } else {
+        updates.grokAccountId = form.grokAccountId
       }
     }
 

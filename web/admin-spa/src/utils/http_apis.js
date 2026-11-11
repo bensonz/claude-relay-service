@@ -54,6 +54,14 @@ export const getTempUnavailableApi = () =>
 export const getUsageCostsApi = (period) =>
   request({ url: `/admin/usage-costs?period=${period}`, method: 'GET' })
 export const getUsageStatsApi = (url) => request({ url, method: 'GET' })
+export const getRequestDetailsApi = (params) =>
+  request({ url: '/admin/request-details', method: 'GET', params })
+export const getRequestDetailBodyPreviewStatsApi = (config) =>
+  request({ url: '/admin/request-details/body-preview-stats', method: 'GET', ...config })
+export const purgeRequestDetailBodyPreviewApi = (config) =>
+  request({ url: '/admin/request-details/body-preview-purge', method: 'POST', ...config })
+export const getRequestDetailApi = (requestId) =>
+  request({ url: `/admin/request-details/${requestId}`, method: 'GET' })
 
 // 客户端
 export const getSupportedClientsApi = () =>
@@ -208,6 +216,17 @@ export const exchangeDroidCodeApi = (data) =>
 export const getDroidAccountByIdApi = (id) =>
   request({ url: `/admin/droid-accounts/${id}`, method: 'GET' })
 
+// Grok 账户
+export const getGrokAccountsApi = () => request({ url: '/admin/grok-accounts', method: 'GET' })
+export const createGrokAccountApi = (data) =>
+  request({ url: '/admin/grok-accounts', method: 'POST', data })
+export const updateGrokAccountApi = (id, data) =>
+  request({ url: `/admin/grok-accounts/${id}`, method: 'PUT', data })
+export const generateGrokAuthUrlApi = (data) =>
+  request({ url: '/admin/grok-accounts/generate-auth-url', method: 'POST', data })
+export const exchangeGrokCodeApi = (data) =>
+  request({ url: '/admin/grok-accounts/exchange-code', method: 'POST', data })
+
 // CCR 账户
 export const getCcrAccountsApi = () => request({ url: '/admin/ccr-accounts', method: 'GET' })
 export const createCcrAccountApi = (data) =>
@@ -271,6 +290,12 @@ export const updateQuotaCardLimitsApi = (data) =>
 // 账户余额
 export const getAccountBalanceApi = (id, params) =>
   request({ url: `/admin/accounts/${id}/balance`, method: 'GET', params })
+
+// 账户错误历史
+export const getAccountErrorHistoryApi = (accountType, accountId, params) =>
+  request({ url: `/admin/accounts/${accountType}/${accountId}/error-history`, params })
+export const clearAccountErrorHistoryApi = (accountType, accountId) =>
+  request({ url: `/admin/accounts/${accountType}/${accountId}/error-history`, method: 'DELETE' })
 export const refreshAccountBalanceApi = (id, data) =>
   request({ url: `/admin/accounts/${id}/balance/refresh`, method: 'POST', data })
 export const getBalanceSummaryApi = () =>

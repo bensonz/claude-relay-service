@@ -34,6 +34,7 @@ const fs = require('fs')
 const path = require('path')
 const logger = require('../utils/logger')
 const { getProjectRoot } = require('../utils/projectPaths')
+const { createRequestDetailMeta } = require('../utils/requestDetailHelper')
 const geminiAccountService = require('./account/geminiAccountService')
 const unifiedGeminiScheduler = require('./scheduler/unifiedGeminiScheduler')
 const sessionHelper = require('../utils/sessionHelper')
@@ -1805,7 +1806,8 @@ async function applyRateLimitTracking(
   usageSummary,
   model,
   context = '',
-  keyId = null
+  keyId = null,
+  preCalculatedCost = null
 ) {
   if (!rateLimitInfo) {
     return
@@ -1819,7 +1821,8 @@ async function applyRateLimitTracking(
       usageSummary,
       model,
       keyId,
-      'gemini'
+      'gemini',
+      preCalculatedCost
     )
     if (totalTokens > 0) {
       logger.api(`📊 Updated rate limit token count${label}: +${totalTokens} tokens`)
@@ -2135,7 +2138,7 @@ async function handleAnthropicMessagesToGemini(req, res, { vendor, baseModel }) 
         : mapGeminiFinishReasonToAnthropicStopReason(finishReason)
 
       if (req.apiKey?.id && (inputTokens > 0 || outputTokens > 0)) {
-        await apiKeyService.recordUsage(
+        const bridgeCosts = await apiKeyService.recordUsage(
           req.apiKey.id,
           inputTokens,
           outputTokens,
@@ -2143,14 +2146,21 @@ async function handleAnthropicMessagesToGemini(req, res, { vendor, baseModel }) 
           0,
           effectiveModel,
           accountId,
-          'gemini'
+          'gemini',
+          null,
+          createRequestDetailMeta(req, {
+            requestBody: req.body,
+            stream: false,
+            statusCode: 200
+          })
         )
         await applyRateLimitTracking(
           req.rateLimitInfo,
           { inputTokens, outputTokens, cacheCreateTokens: 0, cacheReadTokens: 0 },
           effectiveModel,
           'anthropic-messages',
-          req.apiKey?.id
+          req.apiKey?.id,
+          bridgeCosts
         )
       }
 
@@ -2326,7 +2336,7 @@ async function handleAnthropicMessagesToGemini(req, res, { vendor, baseModel }) 
     // [大东的 2.0 补丁 - 修复版] 活跃度看门狗 (Watchdog)
     // ========================================================================
     let activityTimeout = null
-    const STREAM_ACTIVITY_TIMEOUT_MS = 45000 // 45秒无数据视为卡死
+    const STREAM_ACTIVITY_TIMEOUT_MS = 90000 // 90秒无数据视为卡死
 
     const resetActivityTimeout = () => {
       if (activityTimeout) {
@@ -2675,7 +2685,7 @@ async function handleAnthropicMessagesToGemini(req, res, { vendor, baseModel }) 
       }
 
       if (req.apiKey?.id && (inputTokens > 0 || outputTokens > 0)) {
-        await apiKeyService.recordUsage(
+        const bridgeStreamCosts = await apiKeyService.recordUsage(
           req.apiKey.id,
           inputTokens,
           outputTokens,
@@ -2683,13 +2693,21 @@ async function handleAnthropicMessagesToGemini(req, res, { vendor, baseModel }) 
           0,
           effectiveModel,
           accountId,
-          'gemini'
+          'gemini',
+          null,
+          createRequestDetailMeta(req, {
+            requestBody: req.body,
+            stream: true,
+            statusCode: res.statusCode
+          })
         )
         await applyRateLimitTracking(
           req.rateLimitInfo,
           { inputTokens, outputTokens, cacheCreateTokens: 0, cacheReadTokens: 0 },
           effectiveModel,
-          'anthropic-messages-stream'
+          'anthropic-messages-stream',
+          req.apiKey?.id,
+          bridgeStreamCosts
         )
       }
     }

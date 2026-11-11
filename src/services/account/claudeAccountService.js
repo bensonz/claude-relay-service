@@ -17,7 +17,12 @@ const {
 const tokenRefreshService = require('../tokenRefreshService')
 const LRUCache = require('../../utils/lruCache')
 const { formatDateWithTimezone, getISOStringWithTimezone } = require('../../utils/dateHelper')
-const { isOpus45OrNewer } = require('../../utils/modelHelper')
+const { isOpus45OrNewer, RATE_LIMITED_MODEL_FAMILIES } = require('../../utils/modelHelper')
+const {
+  parseBooleanLike,
+  normalizeOptionalNonNegativeInteger,
+  normalizeTempUnavailablePolicyInput
+} = require('../../utils/tempUnavailablePolicy')
 
 /**
  * Check if account is Pro (not Max)
@@ -36,7 +41,8 @@ function isProAccount(info) {
 
 class ClaudeAccountService {
   constructor() {
-    this.claudeApiUrl = 'https://console.anthropic.com/v1/oauth/token'
+    // console.anthropic.com 已迁移至 platform.claude.com，旧域名对 refresh_token grant 返回 404
+    this.claudeApiUrl = 'https://platform.claude.com/v1/oauth/token'
     this.claudeOauthClientId = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
     let maxWarnings = parseInt(process.env.CLAUDE_5H_WARNING_MAX_NOTIFICATIONS || '', 10)
 
@@ -94,10 +100,20 @@ class ClaudeAccountService {
       expiresAt = null, // 账户订阅到期时间
       extInfo = null, // 额外扩展信息
       maxConcurrency = 0, // 账户级用户消息串行队列：0=使用全局配置，>0=强制启用串行
-      interceptWarmup = false // 拦截预热请求（标题生成、Warmup等）
+      interceptWarmup = false, // 拦截预热请求（标题生成、Warmup等）
+      disableTempUnavailable = false, // 是否禁用账号级临时冷却（temp_unavailable）
+      tempUnavailable503TtlSeconds = null, // 账号级 503 冷却秒数（null 跟随全局）
+      tempUnavailable5xxTtlSeconds = null // 账号级 5xx 冷却秒数（null 跟随全局）
     } = options
 
     const accountId = uuidv4()
+    const normalizedTempUnavailablePolicy = normalizeTempUnavailablePolicyInput({
+      disableTempUnavailable,
+      tempUnavailable503TtlSeconds,
+      tempUnavailable5xxTtlSeconds
+    })
+    const normalized503Ttl = normalizedTempUnavailablePolicy.tempUnavailable503TtlSeconds
+    const normalized5xxTtl = normalizedTempUnavailablePolicy.tempUnavailable5xxTtlSeconds
 
     let accountData
     const normalizedExtInfo = this._normalizeExtInfo(extInfo, claudeAiOauth)
@@ -143,7 +159,11 @@ class ClaudeAccountService {
         // 账户级用户消息串行队列限制
         maxConcurrency: maxConcurrency.toString(),
         // 拦截预热请求
-        interceptWarmup: interceptWarmup.toString()
+        interceptWarmup: interceptWarmup.toString(),
+        // 账号级临时冷却覆盖（空字符串表示跟随全局配置）
+        disableTempUnavailable: normalizedTempUnavailablePolicy.disableTempUnavailable.toString(),
+        tempUnavailable503TtlSeconds: normalized503Ttl !== null ? normalized503Ttl.toString() : '',
+        tempUnavailable5xxTtlSeconds: normalized5xxTtl !== null ? normalized5xxTtl.toString() : ''
       }
     } else {
       // 兼容旧格式
@@ -179,7 +199,11 @@ class ClaudeAccountService {
         // 账户级用户消息串行队列限制
         maxConcurrency: maxConcurrency.toString(),
         // 拦截预热请求
-        interceptWarmup: interceptWarmup.toString()
+        interceptWarmup: interceptWarmup.toString(),
+        // 账号级临时冷却覆盖（空字符串表示跟随全局配置）
+        disableTempUnavailable: normalizedTempUnavailablePolicy.disableTempUnavailable.toString(),
+        tempUnavailable503TtlSeconds: normalized503Ttl !== null ? normalized503Ttl.toString() : '',
+        tempUnavailable5xxTtlSeconds: normalized5xxTtl !== null ? normalized5xxTtl.toString() : ''
       }
     }
 
@@ -228,7 +252,10 @@ class ClaudeAccountService {
       useUnifiedClientId,
       unifiedClientId,
       extInfo: normalizedExtInfo,
-      interceptWarmup
+      interceptWarmup,
+      disableTempUnavailable: normalizedTempUnavailablePolicy.disableTempUnavailable,
+      tempUnavailable503TtlSeconds: normalized503Ttl,
+      tempUnavailable5xxTtlSeconds: normalized5xxTtl
     }
   }
 
@@ -396,9 +423,25 @@ class ClaudeAccountService {
       const accountData = await redis.getClaudeAccount(accountId)
       if (accountData) {
         logRefreshError(accountId, accountData.name, 'claude', error)
-        accountData.status = 'error'
-        accountData.errorMessage = error.message
-        await redis.setClaudeAccount(accountId, accountData)
+
+        // disableAutoProtection 检查：跳过状态修改，仅记录日志和错误历史
+        if (
+          accountData.disableAutoProtection === true ||
+          accountData.disableAutoProtection === 'true'
+        ) {
+          logger.info(
+            `🛡️ Account ${accountData.name} (${accountId}) has auto-protection disabled, skipping error status on token refresh failure`
+          )
+          upstreamErrorHelper
+            .recordErrorHistory(accountId, 'claude-official', 0, 'token_refresh_failed', {
+              errorBody: error.message
+            })
+            .catch(() => {})
+        } else {
+          accountData.status = 'error'
+          accountData.errorMessage = error.message
+          await redis.setClaudeAccount(accountId, accountData)
+        }
 
         // 发送Webhook通知
         try {
@@ -507,11 +550,23 @@ class ClaudeAccountService {
       // 处理返回数据，移除敏感信息并添加限流状态和会话窗口信息
       const processedAccounts = await Promise.all(
         accounts.map(async (account) => {
-          // 获取限流状态信息
-          const rateLimitInfo = await this.getAccountRateLimitInfo(account.id)
+          const [rateLimitInfo, sessionWindowInfo, modelRateLimitEntries, isOverloaded] =
+            await Promise.all([
+              this.getAccountRateLimitInfo(account.id),
+              this.getSessionWindowInfo(account.id),
+              Promise.all(
+                RATE_LIMITED_MODEL_FAMILIES.map(async (family) => [
+                  family,
+                  await this.getAccountModelRateLimitInfo(account.id, family, account)
+                ])
+              ),
+              this.isAccountOverloaded(account.id)
+            ])
 
-          // 获取会话窗口信息
-          const sessionWindowInfo = await this.getSessionWindowInfo(account.id)
+          // 各模型家族的独立限流状态（opus/sonnet/haiku/fable）
+          const modelRateLimitStatus = Object.fromEntries(modelRateLimitEntries)
+          const opusRateLimitStatus = modelRateLimitStatus.opus
+          const fableRateLimitStatus = modelRateLimitStatus.fable
 
           // 构建 Claude Usage 快照（从 Redis 读取）
           const claudeUsage = this.buildClaudeUsageSnapshot(account)
@@ -521,6 +576,17 @@ class ClaudeAccountService {
           const isOAuth = scopes.includes('user:profile') && scopes.includes('user:inference')
           const authType = isOAuth ? 'oauth' : 'setup-token'
           const parsedExtInfo = this._safeParseJson(account.extInfo)
+          const parsedProxy = this._safeParseAccountFieldJson(account.proxy, 'proxy', account.id)
+          const parsedSubscriptionInfo = this._safeParseAccountFieldJson(
+            account.subscriptionInfo,
+            'subscriptionInfo',
+            account.id
+          )
+          const normalizedTempUnavailablePolicy = normalizeTempUnavailablePolicyInput({
+            disableTempUnavailable: account.disableTempUnavailable,
+            tempUnavailable503TtlSeconds: account.tempUnavailable503TtlSeconds,
+            tempUnavailable5xxTtlSeconds: account.tempUnavailable5xxTtlSeconds
+          })
 
           return {
             id: account.id,
@@ -528,7 +594,7 @@ class ClaudeAccountService {
             description: account.description,
             email: account.email ? this._maskEmail(this._decryptSensitiveData(account.email)) : '',
             isActive: account.isActive === 'true',
-            proxy: account.proxy ? JSON.parse(account.proxy) : null,
+            proxy: parsedProxy,
             status: account.status,
             errorMessage: account.errorMessage,
             accountType: account.accountType || 'shared', // 兼容旧数据，默认为共享
@@ -549,9 +615,7 @@ class ClaudeAccountService {
             // 添加 refreshToken 是否存在的标记（不返回实际值）
             hasRefreshToken: !!account.refreshToken,
             // 添加套餐信息（如果存在）
-            subscriptionInfo: account.subscriptionInfo
-              ? JSON.parse(account.subscriptionInfo)
-              : null,
+            subscriptionInfo: parsedSubscriptionInfo,
             // 添加限流状态信息
             rateLimitStatus: rateLimitInfo
               ? {
@@ -560,6 +624,17 @@ class ClaudeAccountService {
                   minutesRemaining: rateLimitInfo.minutesRemaining
                 }
               : null,
+            // Opus 专属限流状态（仅影响 Opus 模型路由）
+            opusRateLimitStatus,
+            // Fable 专属限流状态（仅影响 Fable 模型路由）
+            fableRateLimitStatus,
+            // 各模型家族的独立限流状态（opus/sonnet/haiku/fable）
+            modelRateLimitStatus,
+            // 过载状态（429/529 自动保护）
+            overloadStatus: {
+              isOverloaded,
+              lastOverloadAt: account.lastOverloadAt || null
+            },
             // 添加会话窗口信息
             sessionWindow: sessionWindowInfo || {
               hasActiveWindow: false,
@@ -590,7 +665,13 @@ class ClaudeAccountService {
             // 账户级用户消息串行队列限制
             maxConcurrency: parseInt(account.maxConcurrency || '0', 10),
             // 拦截预热请求
-            interceptWarmup: account.interceptWarmup === 'true'
+            interceptWarmup: account.interceptWarmup === 'true',
+            // 账号级临时冷却覆盖
+            disableTempUnavailable: normalizedTempUnavailablePolicy.disableTempUnavailable,
+            tempUnavailable503TtlSeconds:
+              normalizedTempUnavailablePolicy.tempUnavailable503TtlSeconds,
+            tempUnavailable5xxTtlSeconds:
+              normalizedTempUnavailablePolicy.tempUnavailable5xxTtlSeconds
           }
         })
       )
@@ -684,7 +765,10 @@ class ClaudeAccountService {
         'subscriptionExpiresAt',
         'extInfo',
         'maxConcurrency',
-        'interceptWarmup'
+        'interceptWarmup',
+        'disableTempUnavailable',
+        'tempUnavailable503TtlSeconds',
+        'tempUnavailable5xxTtlSeconds'
       ]
       const updatedData = { ...accountData }
       let shouldClearAutoStopFields = false
@@ -701,6 +785,14 @@ class ClaudeAccountService {
             updatedData[field] = value ? JSON.stringify(value) : ''
           } else if (field === 'priority' || field === 'maxConcurrency') {
             updatedData[field] = value.toString()
+          } else if (field === 'disableTempUnavailable') {
+            updatedData[field] = parseBooleanLike(value) ? 'true' : 'false'
+          } else if (
+            field === 'tempUnavailable503TtlSeconds' ||
+            field === 'tempUnavailable5xxTtlSeconds'
+          ) {
+            const normalizedTtl = normalizeOptionalNonNegativeInteger(value)
+            updatedData[field] = normalizedTtl !== null ? normalizedTtl.toString() : ''
           } else if (field === 'subscriptionInfo') {
             // 处理订阅信息更新
             updatedData[field] = typeof value === 'string' ? value : JSON.stringify(value)
@@ -1329,6 +1421,32 @@ class ClaudeAccountService {
         throw new Error('Account not found')
       }
 
+      // disableAutoProtection 检查：跳过自动禁用，仅记录错误历史
+      if (
+        accountData.disableAutoProtection === true ||
+        accountData.disableAutoProtection === 'true'
+      ) {
+        logger.info(
+          `🛡️ Account ${accountData.name} (${accountId}) has auto-protection disabled, skipping rate limit marking`
+        )
+        upstreamErrorHelper
+          .recordErrorHistory(accountId, 'claude-official', 429, 'rate_limit')
+          .catch(() => {})
+        return { success: true, skipped: true }
+      }
+
+      // 无上游权威 reset 时间的 429 大概率不是真实限流（如 overage、org_level_disabled、extra usage），
+      // 不标记账号限流，直接透传错误给客户端（与 sub2api 对 Anthropic 平台无 reset 头 429 的处理一致）
+      if (!rateLimitResetTimestamp) {
+        logger.warn(
+          `⚠️ 429 without authoritative reset header for account ${accountData.name} (${accountId}), skipping rate limit marking`
+        )
+        upstreamErrorHelper
+          .recordErrorHistory(accountId, 'claude-official', 429, 'rate_limit')
+          .catch(() => {})
+        return { success: true, skipped: true }
+      }
+
       // 设置限流状态和时间
       const updatedAccountData = { ...accountData }
       updatedAccountData.rateLimitedAt = new Date().toISOString()
@@ -1338,45 +1456,20 @@ class ClaudeAccountService {
       // 使用独立的限流自动停止标记，避免与其他自动停止冲突
       updatedAccountData.rateLimitAutoStopped = 'true'
 
-      // 如果提供了准确的限流重置时间戳（来自API响应头）
-      if (rateLimitResetTimestamp) {
-        // 将Unix时间戳（秒）转换为毫秒并创建Date对象
-        const resetTime = new Date(rateLimitResetTimestamp * 1000)
-        updatedAccountData.rateLimitEndAt = resetTime.toISOString()
+      // 将Unix时间戳（秒）转换为毫秒并创建Date对象
+      const resetTime = new Date(rateLimitResetTimestamp * 1000)
+      updatedAccountData.rateLimitEndAt = resetTime.toISOString()
 
-        // 计算当前会话窗口的开始时间（重置时间减去5小时）
-        const windowStartTime = new Date(resetTime.getTime() - 5 * 60 * 60 * 1000)
-        updatedAccountData.sessionWindowStart = windowStartTime.toISOString()
-        updatedAccountData.sessionWindowEnd = resetTime.toISOString()
+      // 计算当前会话窗口的开始时间（重置时间减去5小时）
+      const windowStartTime = new Date(resetTime.getTime() - 5 * 60 * 60 * 1000)
+      updatedAccountData.sessionWindowStart = windowStartTime.toISOString()
+      updatedAccountData.sessionWindowEnd = resetTime.toISOString()
 
-        const now = new Date()
-        const minutesUntilEnd = Math.ceil((resetTime - now) / (1000 * 60))
-        logger.warn(
-          `🚫 Account marked as rate limited with accurate reset time: ${accountData.name} (${accountId}) - ${minutesUntilEnd} minutes remaining until ${resetTime.toISOString()}`
-        )
-      } else {
-        // 获取或创建会话窗口（预估方式）
-        const windowData = await this.updateSessionWindow(accountId, updatedAccountData)
-        Object.assign(updatedAccountData, windowData)
-
-        // 限流结束时间 = 会话窗口结束时间
-        if (updatedAccountData.sessionWindowEnd) {
-          updatedAccountData.rateLimitEndAt = updatedAccountData.sessionWindowEnd
-          const windowEnd = new Date(updatedAccountData.sessionWindowEnd)
-          const now = new Date()
-          const minutesUntilEnd = Math.ceil((windowEnd - now) / (1000 * 60))
-          logger.warn(
-            `🚫 Account marked as rate limited until estimated session window ends: ${accountData.name} (${accountId}) - ${minutesUntilEnd} minutes remaining`
-          )
-        } else {
-          // 如果没有会话窗口，使用默认1小时（兼容旧逻辑）
-          const oneHourLater = new Date(Date.now() + 60 * 60 * 1000)
-          updatedAccountData.rateLimitEndAt = oneHourLater.toISOString()
-          logger.warn(
-            `🚫 Account marked as rate limited (1 hour default): ${accountData.name} (${accountId})`
-          )
-        }
-      }
+      const now = new Date()
+      const minutesUntilEnd = Math.ceil((resetTime - now) / (1000 * 60))
+      logger.warn(
+        `🚫 Account marked as rate limited with accurate reset time: ${accountData.name} (${accountId}) - ${minutesUntilEnd} minutes remaining until ${resetTime.toISOString()}`
+      )
 
       await redis.setClaudeAccount(accountId, updatedAccountData)
 
@@ -1395,7 +1488,7 @@ class ClaudeAccountService {
           platform: 'claude-oauth',
           status: 'error',
           errorCode: 'CLAUDE_OAUTH_RATE_LIMITED',
-          reason: `Account rate limited (429 error). ${rateLimitResetTimestamp ? `Reset at: ${formatDateWithTimezone(rateLimitResetTimestamp)}` : 'Estimated reset in 1-5 hours'}`,
+          reason: `Account rate limited (429 error). Reset at: ${formatDateWithTimezone(rateLimitResetTimestamp)}`,
           timestamp: getISOStringWithTimezone(new Date())
         })
       } catch (webhookError) {
@@ -1409,119 +1502,217 @@ class ClaudeAccountService {
     }
   }
 
-  // 🚫 标记账号的 Opus 限流状态（不影响其他模型调度）
-  async markAccountOpusRateLimited(accountId, rateLimitResetTimestamp = null) {
+  // 🧩 按模型家族存储的限流字段名（沿用既有 opus/fable 字段名，向后兼容旧数据）
+  _modelRateLimitFields(family) {
+    return {
+      atField: `${family}RateLimitedAt`,
+      endField: `${family}RateLimitEndAt`
+    }
+  }
+
+  // 🚫 标记账号在某个模型家族上的限流（仅影响该模型路由，不停用整个账号）
+  async markAccountModelRateLimited(accountId, family, rateLimitResetTimestamp = null) {
     try {
       const accountData = await redis.getClaudeAccount(accountId)
       if (!accountData || Object.keys(accountData).length === 0) {
         throw new Error('Account not found')
       }
 
+      const { atField, endField } = this._modelRateLimitFields(family)
       const updatedAccountData = { ...accountData }
-      const now = new Date()
-      updatedAccountData.opusRateLimitedAt = now.toISOString()
+      updatedAccountData[atField] = new Date().toISOString()
 
       if (rateLimitResetTimestamp) {
         const resetTime = new Date(rateLimitResetTimestamp * 1000)
-        updatedAccountData.opusRateLimitEndAt = resetTime.toISOString()
+        updatedAccountData[endField] = resetTime.toISOString()
         logger.warn(
-          `🚫 Account ${accountData.name} (${accountId}) reached Opus weekly cap, resets at ${resetTime.toISOString()}`
+          `🚫 Account ${accountData.name} (${accountId}) reached ${family} model cap, resets at ${resetTime.toISOString()}`
         )
       } else {
         // 如果缺少准确时间戳，保留现有值但记录警告，便于后续人工干预
         logger.warn(
-          `⚠️ Account ${accountData.name} (${accountId}) reported Opus limit without reset timestamp`
+          `⚠️ Account ${accountData.name} (${accountId}) reported ${family} limit without reset timestamp`
         )
       }
 
       await redis.setClaudeAccount(accountId, updatedAccountData)
       return { success: true }
     } catch (error) {
-      logger.error(`❌ Failed to mark Opus rate limit for account: ${accountId}`, error)
+      logger.error(`❌ Failed to mark ${family} rate limit for account: ${accountId}`, error)
       throw error
     }
   }
 
-  // ✅ 清除账号的 Opus 限流状态
-  async clearAccountOpusRateLimit(accountId) {
+  // ✅ 清除账号在某个模型家族上的限流状态
+  async clearAccountModelRateLimit(accountId, family) {
     try {
       const accountData = await redis.getClaudeAccount(accountId)
       if (!accountData || Object.keys(accountData).length === 0) {
         return { success: true }
       }
 
+      const { atField, endField } = this._modelRateLimitFields(family)
       const updatedAccountData = { ...accountData }
-      delete updatedAccountData.opusRateLimitedAt
-      delete updatedAccountData.opusRateLimitEndAt
+      delete updatedAccountData[atField]
+      delete updatedAccountData[endField]
 
       await redis.setClaudeAccount(accountId, updatedAccountData)
 
       const redisKey = `claude:account:${accountId}`
       if (redis.client && typeof redis.client.hdel === 'function') {
-        await redis.client.hdel(redisKey, 'opusRateLimitedAt', 'opusRateLimitEndAt')
+        await redis.client.hdel(redisKey, atField, endField)
       }
 
-      logger.info(`✅ Cleared Opus rate limit state for account ${accountId}`)
+      logger.info(`✅ Cleared ${family} rate limit state for account ${accountId}`)
       return { success: true }
     } catch (error) {
-      logger.error(`❌ Failed to clear Opus rate limit for account: ${accountId}`, error)
+      logger.error(`❌ Failed to clear ${family} rate limit for account: ${accountId}`, error)
       throw error
     }
   }
 
-  // 🔍 检查账号是否处于 Opus 限流状态（自动清理过期标记）
-  async isAccountOpusRateLimited(accountId) {
+  // 📊 获取账号在某个模型家族上的限流信息（自动清理过期状态）
+  async getAccountModelRateLimitInfo(accountId, family, accountData = null) {
     try {
+      const { atField, endField } = this._modelRateLimitFields(family)
+      const data = accountData || (await redis.getClaudeAccount(accountId))
+      if (!data || Object.keys(data).length === 0 || !data[endField]) {
+        return { isRateLimited: false, rateLimitedAt: null, resetAt: null, minutesRemaining: 0 }
+      }
+
+      const resetAtMs = Date.parse(data[endField])
+      if (Number.isNaN(resetAtMs)) {
+        return {
+          isRateLimited: false,
+          rateLimitedAt: data[atField] || null,
+          resetAt: null,
+          minutesRemaining: 0
+        }
+      }
+
+      const nowMs = Date.now()
+      if (nowMs >= resetAtMs) {
+        // 自动清理过期标记，避免前端持续显示陈旧状态
+        await this.clearAccountModelRateLimit(accountId, family).catch(() => {})
+        return {
+          isRateLimited: false,
+          rateLimitedAt: data[atField] || null,
+          resetAt: data[endField],
+          minutesRemaining: 0
+        }
+      }
+
+      return {
+        isRateLimited: true,
+        rateLimitedAt: data[atField] || null,
+        resetAt: data[endField],
+        minutesRemaining: Math.max(0, Math.ceil((resetAtMs - nowMs) / (1000 * 60)))
+      }
+    } catch (error) {
+      logger.error(`❌ Failed to get ${family} rate limit info for account: ${accountId}`, error)
+      return { isRateLimited: false, rateLimitedAt: null, resetAt: null, minutesRemaining: 0 }
+    }
+  }
+
+  // 🔍 检查账号在某个模型家族上是否处于限流状态（自动清理过期标记）
+  async isAccountModelRateLimited(accountId, family) {
+    try {
+      const { endField } = this._modelRateLimitFields(family)
       const accountData = await redis.getClaudeAccount(accountId)
-      if (!accountData || Object.keys(accountData).length === 0) {
+      if (!accountData || Object.keys(accountData).length === 0 || !accountData[endField]) {
         return false
       }
 
-      if (!accountData.opusRateLimitEndAt) {
-        return false
-      }
-
-      const resetTime = new Date(accountData.opusRateLimitEndAt)
-      if (Number.isNaN(resetTime.getTime())) {
-        await this.clearAccountOpusRateLimit(accountId)
-        return false
-      }
-
-      const now = new Date()
-      if (now >= resetTime) {
-        await this.clearAccountOpusRateLimit(accountId)
+      const resetTime = new Date(accountData[endField])
+      if (Number.isNaN(resetTime.getTime()) || new Date() >= resetTime) {
+        await this.clearAccountModelRateLimit(accountId, family)
         return false
       }
 
       return true
     } catch (error) {
-      logger.error(`❌ Failed to check Opus rate limit status for account: ${accountId}`, error)
+      logger.error(
+        `❌ Failed to check ${family} rate limit status for account: ${accountId}`,
+        error
+      )
       return false
     }
   }
 
-  // ♻️ 检查并清理已过期的 Opus 限流标记
-  async clearExpiredOpusRateLimit(accountId) {
+  // ♻️ 检查并清理已过期的模型家族限流标记
+  async clearExpiredModelRateLimit(accountId, family) {
     try {
+      const { endField } = this._modelRateLimitFields(family)
       const accountData = await redis.getClaudeAccount(accountId)
-      if (!accountData || Object.keys(accountData).length === 0) {
+      if (!accountData || Object.keys(accountData).length === 0 || !accountData[endField]) {
         return { success: true }
       }
 
-      if (!accountData.opusRateLimitEndAt) {
-        return { success: true }
-      }
-
-      const resetTime = new Date(accountData.opusRateLimitEndAt)
+      const resetTime = new Date(accountData[endField])
       if (Number.isNaN(resetTime.getTime()) || new Date() >= resetTime) {
-        await this.clearAccountOpusRateLimit(accountId)
+        await this.clearAccountModelRateLimit(accountId, family)
       }
 
       return { success: true }
     } catch (error) {
-      logger.error(`❌ Failed to clear expired Opus rate limit for account: ${accountId}`, error)
+      logger.error(
+        `❌ Failed to clear expired ${family} rate limit for account: ${accountId}`,
+        error
+      )
       throw error
     }
+  }
+
+  // ---- 以下为按模型家族限流的兼容封装：保持既有调用方与 Redis 字段名不变 ----
+
+  // 🚫 标记账号的 Opus 限流状态（不影响其他模型调度）
+  async markAccountOpusRateLimited(accountId, rateLimitResetTimestamp = null) {
+    return this.markAccountModelRateLimited(accountId, 'opus', rateLimitResetTimestamp)
+  }
+
+  // ✅ 清除账号的 Opus 限流状态
+  async clearAccountOpusRateLimit(accountId) {
+    return this.clearAccountModelRateLimit(accountId, 'opus')
+  }
+
+  // 📊 获取账号 Opus 限流信息（自动清理过期状态）
+  async getAccountOpusRateLimitInfo(accountId, accountData = null) {
+    return this.getAccountModelRateLimitInfo(accountId, 'opus', accountData)
+  }
+
+  // 🔍 检查账号是否处于 Opus 限流状态（自动清理过期标记）
+  async isAccountOpusRateLimited(accountId) {
+    return this.isAccountModelRateLimited(accountId, 'opus')
+  }
+
+  // ♻️ 检查并清理已过期的 Opus 限流标记
+  async clearExpiredOpusRateLimit(accountId) {
+    return this.clearExpiredModelRateLimit(accountId, 'opus')
+  }
+
+  // 🚫 标记账号的 Fable 限流状态（不影响其他模型调度）
+  async markAccountFableRateLimited(accountId, rateLimitResetTimestamp = null) {
+    return this.markAccountModelRateLimited(accountId, 'fable', rateLimitResetTimestamp)
+  }
+
+  // ✅ 清除账号的 Fable 限流状态
+  async clearAccountFableRateLimit(accountId) {
+    return this.clearAccountModelRateLimit(accountId, 'fable')
+  }
+
+  // 📊 获取账号 Fable 限流信息（自动清理过期状态）
+  async getAccountFableRateLimitInfo(accountId, accountData = null) {
+    return this.getAccountModelRateLimitInfo(accountId, 'fable', accountData)
+  }
+
+  // 🔍 检查账号是否处于 Fable 限流状态（自动清理过期标记）
+  async isAccountFableRateLimited(accountId) {
+    return this.isAccountModelRateLimited(accountId, 'fable')
+  }
+
+  // ♻️ 检查并清理已过期的 Fable 限流标记
+  async clearExpiredFableRateLimit(accountId) {
+    return this.clearExpiredModelRateLimit(accountId, 'fable')
   }
 
   // ✅ 移除账号的限流状态
@@ -1955,6 +2146,33 @@ class ClaudeAccountService {
     }
   }
 
+  // 🧮 从上游 limits[] 中提取「按模型限定的周窗口」
+  // 形如：{ kind: 'weekly_scoped', percent, resets_at, scope: { model: { display_name } } }
+  _extractWeeklyScopedModels(limits) {
+    if (!Array.isArray(limits)) {
+      return []
+    }
+
+    const result = []
+    for (const limit of limits) {
+      if (!limit || limit.kind !== 'weekly_scoped') {
+        continue
+      }
+      const modelName = limit.scope?.model?.display_name
+      if (!modelName) {
+        continue
+      }
+      result.push({
+        modelName: String(modelName),
+        utilization: this._toNumberOrNull(limit.percent),
+        resetsAt: limit.resets_at || null,
+        severity: limit.severity || null,
+        isActive: limit.is_active === true
+      })
+    }
+    return result
+  }
+
   // 📊 构建 Claude Usage 快照（从 Redis 数据）
   buildClaudeUsageSnapshot(accountData) {
     const updatedAt = accountData.claudeUsageUpdatedAt
@@ -1966,15 +2184,36 @@ class ClaudeAccountService {
     const sevenDayOpusUtilization = this._toNumberOrNull(accountData.claudeSevenDayOpusUtilization)
     const sevenDayOpusResetsAt = accountData.claudeSevenDayOpusResetsAt
 
+    let scopedModels = []
+    if (accountData.claudeWeeklyScopedModels) {
+      try {
+        const parsed = JSON.parse(accountData.claudeWeeklyScopedModels)
+        if (Array.isArray(parsed)) {
+          scopedModels = parsed
+        }
+      } catch {
+        // 脏数据不应该让整个用量快照失败
+        scopedModels = []
+      }
+    }
+
     const hasFiveHourData = fiveHourUtilization !== null || fiveHourResetsAt
     const hasSevenDayData = sevenDayUtilization !== null || sevenDayResetsAt
     const hasSevenDayOpusData = sevenDayOpusUtilization !== null || sevenDayOpusResetsAt
 
-    if (!updatedAt && !hasFiveHourData && !hasSevenDayData && !hasSevenDayOpusData) {
+    if (
+      !updatedAt &&
+      !hasFiveHourData &&
+      !hasSevenDayData &&
+      !hasSevenDayOpusData &&
+      scopedModels.length === 0
+    ) {
       return null
     }
 
     const now = Date.now()
+    const remainingFrom = (resetsAt) =>
+      resetsAt ? Math.max(0, Math.floor((new Date(resetsAt).getTime() - now) / 1000)) : null
 
     return {
       updatedAt,
@@ -1998,7 +2237,21 @@ class ClaudeAccountService {
         remainingSeconds: sevenDayOpusResetsAt
           ? Math.max(0, Math.floor((new Date(sevenDayOpusResetsAt).getTime() - now) / 1000))
           : null
-      }
+      },
+      // 上游按模型限定的周窗口（如 Fable），由 limits[] 解析而来。
+      // Redis 里可能存着 [null] 这类脏数据（Array.isArray 放行），而本方法的调用点
+      // 之一在 claudeAccounts.js 的 try 之外，抛异常会被 Promise.allSettled 无声吞掉，
+      // 表现为该账号所有用量条凭空消失。先过滤掉非对象元素。
+      sevenDayScopedModels: scopedModels
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => ({
+          modelName: item.modelName,
+          utilization: this._toNumberOrNull(item.utilization),
+          resetsAt: item.resetsAt || null,
+          severity: item.severity || null,
+          isActive: item.isActive === true,
+          remainingSeconds: remainingFrom(item.resetsAt)
+        }))
     }
   }
 
@@ -2040,9 +2293,24 @@ class ClaudeAccountService {
       }
     }
 
-    if (Object.keys(updates).length === 0) {
+    // 按模型限定的周窗口。
+    // 上游把这类额度放在 limits[] 里，而不是顶层的具名窗口：
+    //   { kind: "weekly_scoped", percent: 9, resets_at: "...",
+    //     scope: { model: { display_name: "Fable" } }, is_active: true }
+    // 顶层的 seven_day_opus / seven_day_sonnet 对这些账号一直是 null，
+    // 真正有数据的是这里，所以模型级用量必须从 limits[] 取。
+    const scopedModels = this._extractWeeklyScopedModels(usageData.limits)
+
+    // 上游什么都没回传时保持原样返回，不去 bump claudeUsageUpdatedAt
+    if (Object.keys(updates).length === 0 && scopedModels.length === 0) {
       return
     }
+
+    // 只要本次有任何窗口数据，就连空数组一起写回（而不是「非空才写」）。
+    // setClaudeAccount 走的是 Object.assign 合并，只在非空时写会让上游停止返回该
+    // 条目之后旧快照永久留在 Redis —— resetsAt 落到过去、remainingSeconds 恒为 0，
+    // 前端就一直挂着一条百分比冻结的僵尸进度条。
+    updates.claudeWeeklyScopedModels = JSON.stringify(scopedModels)
 
     updates.claudeUsageUpdatedAt = new Date().toISOString()
 
@@ -2119,14 +2387,21 @@ class ClaudeAccountService {
           organizationType: profileData.organization?.organization_type
         })
 
+        const organizationType = String(
+          profileData.organization?.organization_type || ''
+        ).toLowerCase()
+        const isEnterpriseOrg = organizationType === 'claude_enterprise'
+        const hasClaudeMax = profileData.account?.has_claude_max === true || isEnterpriseOrg
+        const hasClaudePro = profileData.account?.has_claude_pro === true && !hasClaudeMax
+
         // 构建订阅信息
         const subscriptionInfo = {
           // 账号信息
           email: profileData.account?.email,
           fullName: profileData.account?.full_name,
           displayName: profileData.account?.display_name,
-          hasClaudeMax: profileData.account?.has_claude_max || false,
-          hasClaudePro: profileData.account?.has_claude_pro || false,
+          hasClaudeMax,
+          hasClaudePro,
           accountUuid: profileData.account?.uuid,
 
           // 组织信息
@@ -2136,13 +2411,8 @@ class ClaudeAccountService {
           rateLimitTier: profileData.organization?.rate_limit_tier,
           organizationType: profileData.organization?.organization_type,
 
-          // 账号类型（基于 has_claude_max 和 has_claude_pro 判断）
-          accountType:
-            profileData.account?.has_claude_max === true
-              ? 'claude_max'
-              : profileData.account?.has_claude_pro === true
-                ? 'claude_pro'
-                : 'free',
+          // 账号类型：Enterprise 组织按 Max 能力处理，确保可调度 Opus
+          accountType: hasClaudeMax ? 'claude_max' : hasClaudePro ? 'claude_pro' : 'claude_max',
 
           // 更新时间
           profileFetchedAt: new Date().toISOString()
@@ -2365,6 +2635,21 @@ class ClaudeAccountService {
         throw new Error('Account not found')
       }
 
+      // disableAutoProtection 检查：跳过自动禁用，仅记录错误历史
+      if (
+        accountData.disableAutoProtection === true ||
+        accountData.disableAutoProtection === 'true'
+      ) {
+        logger.info(
+          `🛡️ Account ${accountData.name} (${accountId}) has auto-protection disabled, skipping ${errorType} marking`
+        )
+        const statusCode = errorType === 'unauthorized' ? 401 : 403
+        upstreamErrorHelper
+          .recordErrorHistory(accountId, 'claude-official', statusCode, errorType)
+          .catch(() => {})
+        return { success: true, skipped: true }
+      }
+
       // 更新账户状态
       const updatedAccountData = { ...accountData }
       updatedAccountData.status = errorConfig.status
@@ -2460,6 +2745,12 @@ class ClaudeAccountService {
       delete updatedAccountData.tempErrorAt
       delete updatedAccountData.sessionWindowStart
       delete updatedAccountData.sessionWindowEnd
+      for (const family of RATE_LIMITED_MODEL_FAMILIES) {
+        const { atField, endField } = this._modelRateLimitFields(family)
+        delete updatedAccountData[atField]
+        delete updatedAccountData[endField]
+      }
+      delete updatedAccountData.lastOverloadAt
 
       // 保存更新后的账户数据
       await redis.setClaudeAccount(accountId, updatedAccountData)
@@ -2475,6 +2766,11 @@ class ClaudeAccountService {
         'tempErrorAt',
         'sessionWindowStart',
         'sessionWindowEnd',
+        ...RATE_LIMITED_MODEL_FAMILIES.flatMap((family) => [
+          `${family}RateLimitedAt`,
+          `${family}RateLimitEndAt`
+        ]),
+        'lastOverloadAt',
         // 新的独立标记
         'rateLimitAutoStopped',
         'fiveHourAutoStopped',
@@ -2506,7 +2802,10 @@ class ClaudeAccountService {
       await redis.client.del(overloadKey)
 
       // 清除临时不可用状态
-      await upstreamErrorHelper.clearTempUnavailable(accountId, 'claude-official').catch(() => {})
+      await Promise.all([
+        upstreamErrorHelper.clearTempUnavailable(accountId, 'claude-official').catch(() => {}),
+        upstreamErrorHelper.clearTempUnavailable(accountId, 'claude').catch(() => {})
+      ])
 
       logger.info(
         `✅ Successfully reset all error states for account ${accountData.name} (${accountId})`
@@ -2635,6 +2934,20 @@ class ClaudeAccountService {
       const accountData = await redis.getClaudeAccount(accountId)
       if (!accountData || Object.keys(accountData).length === 0) {
         throw new Error('Account not found')
+      }
+
+      // disableAutoProtection 检查：跳过自动禁用，仅记录错误历史
+      if (
+        accountData.disableAutoProtection === true ||
+        accountData.disableAutoProtection === 'true'
+      ) {
+        logger.info(
+          `🛡️ Account ${accountData.name} (${accountId}) has auto-protection disabled, skipping temp error marking`
+        )
+        upstreamErrorHelper
+          .recordErrorHistory(accountId, 'claude-official', 500, 'server_error')
+          .catch(() => {})
+        return { success: true, skipped: true }
       }
 
       // 更新账户状态
@@ -2844,6 +3157,20 @@ class ClaudeAccountService {
       const accountData = await redis.getClaudeAccount(accountId)
       if (!accountData) {
         throw new Error('Account not found')
+      }
+
+      // disableAutoProtection 检查：跳过过载标记，仅记录错误历史
+      if (
+        accountData.disableAutoProtection === true ||
+        accountData.disableAutoProtection === 'true'
+      ) {
+        logger.info(
+          `🛡️ Account ${accountData.name} (${accountId}) has auto-protection disabled, skipping overload marking`
+        )
+        upstreamErrorHelper
+          .recordErrorHistory(accountId, 'claude-official', 529, 'overload')
+          .catch(() => {})
+        return { success: true, skipped: true }
       }
 
       // 获取配置的过载处理时间（分钟）
@@ -3203,6 +3530,28 @@ class ClaudeAccountService {
       return parsed && typeof parsed === 'object' ? parsed : null
     } catch (error) {
       logger.warn('⚠️ 解析扩展信息失败，已忽略：', error.message)
+      return null
+    }
+  }
+
+  _safeParseAccountFieldJson(value, fieldName, accountId = '') {
+    if (!value) {
+      return null
+    }
+    if (typeof value === 'object') {
+      return value
+    }
+    if (typeof value !== 'string') {
+      return null
+    }
+
+    try {
+      const parsed = JSON.parse(value)
+      return parsed && typeof parsed === 'object' ? parsed : null
+    } catch (error) {
+      logger.warn(
+        `⚠️ Failed to parse ${fieldName} for Claude account ${accountId || 'unknown'}, ignored: ${error.message}`
+      )
       return null
     }
   }

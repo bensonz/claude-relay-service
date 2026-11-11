@@ -5,6 +5,7 @@
 
 const CLAUDE_MODELS = [
   { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
   { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5' },
   { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },
   { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4' },
@@ -18,7 +19,15 @@ const GEMINI_MODELS = [
   { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
   { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
   { value: 'gemini-3-pro-preview', label: 'Gemini 3 Pro Preview' },
-  { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview' }
+  { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview' },
+  { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' }
+]
+
+const GROK_MODELS = [
+  { value: 'grok-4.5', label: 'Grok 4.5' },
+  { value: 'grok-4.3', label: 'Grok 4.3' },
+  { value: 'grok-build-0.1', label: 'Grok Build 0.1' },
+  { value: 'grok-composer-2.5-fast', label: 'Grok Composer 2.5 Fast' }
 ]
 
 const OPENAI_MODELS = [
@@ -32,6 +41,9 @@ const OPENAI_MODELS = [
   { value: 'gpt-5.2', label: 'GPT-5.2' },
   { value: 'gpt-5.2-codex', label: 'GPT-5.2 Codex' },
   { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
+  { value: 'gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark' },
+  { value: 'gpt-5.4', label: 'GPT-5.4' },
+  { value: 'gpt-5.4-pro', label: 'GPT-5.4 Pro' },
   { value: 'codex-mini', label: 'Codex Mini' }
 ]
 
@@ -60,6 +72,7 @@ const PLATFORM_TEST_MODELS = {
   'openai-responses': OPENAI_MODELS,
   'azure-openai': [],
   droid: CLAUDE_MODELS,
+  grok: GROK_MODELS,
   ccr: CLAUDE_MODELS
 }
 
@@ -67,6 +80,7 @@ module.exports = {
   CLAUDE_MODELS,
   GEMINI_MODELS,
   OPENAI_MODELS,
+  GROK_MODELS,
   BEDROCK_MODELS,
   OTHER_MODELS,
   PLATFORM_TEST_MODELS,
@@ -79,10 +93,18 @@ module.exports = {
         return GEMINI_MODELS
       case 'openai':
         return OPENAI_MODELS
+      case 'grok':
+        return GROK_MODELS
       default:
         return []
     }
   },
   // 获取所有模型（用于账户编辑）
-  getAllModels: () => [...CLAUDE_MODELS, ...GEMINI_MODELS, ...OPENAI_MODELS, ...OTHER_MODELS]
+  getAllModels: () => [
+    ...CLAUDE_MODELS,
+    ...GEMINI_MODELS,
+    ...OPENAI_MODELS,
+    ...GROK_MODELS,
+    ...OTHER_MODELS
+  ]
 }
