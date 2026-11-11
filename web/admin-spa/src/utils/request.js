@@ -35,7 +35,11 @@ const request = async (config) => {
   try {
     return await axiosInstance(config)
   } catch (error) {
-    console.error('Request failed:', error)
+    console.error('Request failed:', {
+      method: config.method,
+      url: config.url,
+      status: error.response?.status
+    })
     const data = error.response?.data
     // 如果后端返回了数据，直接返回（可能是 { success, message } 或 { error, message } 格式）
     if (data) {

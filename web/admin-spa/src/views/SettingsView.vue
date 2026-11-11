@@ -6,12 +6,14 @@
         <h3 class="mb-1 text-lg font-bold text-gray-900 dark:text-gray-100 sm:mb-2 sm:text-xl">
           系统设置
         </h3>
-        <p class="text-sm text-gray-600 dark:text-gray-400 sm:text-base">网站定制和通知配置</p>
+        <p class="text-sm text-gray-600 dark:text-gray-400 sm:text-base">
+          网站定制、通知和管理员配置
+        </p>
       </div>
 
       <!-- 设置分类导航 -->
       <div class="mb-6">
-        <nav class="flex space-x-8">
+        <nav class="flex flex-wrap gap-x-8 gap-y-4">
           <button
             :class="[
               'border-b-2 pb-2 text-sm font-medium transition-colors',
@@ -71,6 +73,18 @@
           >
             <i class="fas fa-coins mr-2"></i>
             模型价格
+          </button>
+          <button
+            :class="[
+              'border-b-2 pb-2 text-sm font-medium transition-colors',
+              activeSection === 'admins'
+                ? 'border-blue-500 text-blue-600 dark:border-blue-400 dark:text-blue-400'
+                : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
+            ]"
+            @click="activeSection = 'admins'"
+          >
+            <i class="fas fa-user-shield mr-2"></i>
+            管理员账户
           </button>
         </nav>
       </div>
@@ -1223,6 +1237,7 @@
         <div v-show="activeSection === 'modelPricing'">
           <ModelPricingSection />
         </div>
+        <AdminAccountsSection v-if="activeSection === 'admins'" />
       </div>
     </div>
   </div>
@@ -1825,6 +1840,7 @@ import { useSettingsStore } from '@/stores/settings'
 import * as httpApis from '@/utils/http_apis'
 import ConfirmModal from '@/components/common/ConfirmModal.vue'
 import ModelPricingSection from '@/components/settings/ModelPricingSection.vue'
+import AdminAccountsSection from '@/components/settings/AdminAccountsSection.vue'
 
 // 定义组件名称，用于keep-alive排除
 defineOptions({

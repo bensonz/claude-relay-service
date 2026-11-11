@@ -27,6 +27,11 @@ export const loginApi = (data) => request({ url: '/web/auth/login', method: 'POS
 export const getAuthUserApi = () => request({ url: '/web/auth/user', method: 'GET' })
 export const changePasswordApi = (data) =>
   request({ url: '/web/auth/change-password', method: 'POST', data })
+export const getAdminAccountsApi = () => request({ url: '/web/auth/admins', method: 'GET' })
+export const createAdminAccountApi = (data) =>
+  request({ url: '/web/auth/admins', method: 'POST', data })
+export const updateAdminAccountApi = (id, data) =>
+  request({ url: `/web/auth/admins/${encodeURIComponent(id)}`, method: 'PATCH', data })
 
 // OEM 设置
 export const getOemSettingsApi = () => request({ url: '/admin/oem-settings', method: 'GET' })

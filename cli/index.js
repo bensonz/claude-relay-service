@@ -5,12 +5,13 @@ const inquirer = require('inquirer')
 const chalk = require('chalk')
 const ora = require('ora')
 const { table } = require('table')
-const bcrypt = require('bcryptjs')
+const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
 
 const redis = require('../src/models/redis')
 const apiKeyService = require('../src/services/apiKeyService')
+const adminService = require('../src/services/adminService')
 const claudeAccountService = require('../src/services/account/claudeAccountService')
 const bedrockAccountService = require('../src/services/account/bedrockAccountService')
 
@@ -237,11 +238,15 @@ async function createInitialAdmin() {
 
   try {
     // 1. 先更新 init.json（唯一真实数据源）
+    const existingData = fs.existsSync(initFilePath) ? adminService.readData() : {}
+    adminService.assertUniqueUsername(existingData, adminData.username, 'primary')
     const initData = {
-      initializedAt: new Date().toISOString(),
+      ...existingData,
+      initializedAt: existingData.initializedAt || new Date().toISOString(),
       adminUsername: adminData.username,
       adminPassword: adminData.password, // 保存明文密码
-      version: '1.0.0',
+      version: existingData.version || '1.0.0',
+      adminCredentialsVersion: crypto.randomUUID(),
       updatedAt: new Date().toISOString()
     }
 
@@ -252,20 +257,10 @@ async function createInitialAdmin() {
     }
 
     // 写入文件
-    fs.writeFileSync(initFilePath, JSON.stringify(initData, null, 2))
+    adminService.writeData(initData)
 
     // 2. 再更新 Redis 缓存
-    const passwordHash = await bcrypt.hash(adminData.password, 12)
-
-    const credentials = {
-      username: adminData.username,
-      passwordHash,
-      createdAt: new Date().toISOString(),
-      lastLogin: null,
-      updatedAt: new Date().toISOString()
-    }
-
-    await redis.setSession('admin_credentials', credentials, 0) // 永不过期
+    await adminService.initialize()
 
     spinner.succeed('管理员账户创建成功')
     console.log(`${styles.success('✅')} 用户名: ${adminData.username}`)

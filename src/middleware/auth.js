@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid')
 const config = require('../../config/config')
 const apiKeyService = require('../services/apiKeyService')
 const userService = require('../services/userService')
+const adminService = require('../services/adminService')
 const logger = require('../utils/logger')
 const redis = require('../models/redis')
 // const { RateLimiterRedis } = require('rate-limiter-flexible') // 暂时未使用
@@ -1385,12 +1386,13 @@ const authenticateAdmin = async (req, res, next) => {
     }
 
     // 获取管理员会话（带超时处理）
+    let sessionTimeout
     const adminSession = await Promise.race([
       redis.getSession(token),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Session lookup timeout')), 5000)
-      )
-    ])
+      new Promise((_, reject) => {
+        sessionTimeout = setTimeout(() => reject(new Error('Session lookup timeout')), 5000)
+      })
+    ]).finally(() => clearTimeout(sessionTimeout))
 
     if (!adminSession || Object.keys(adminSession).length === 0) {
       logger.security(`Invalid admin token attempt from ${req.ip || 'unknown'}`)
@@ -1412,22 +1414,17 @@ const authenticateAdmin = async (req, res, next) => {
       })
     }
 
-    // 检查会话活跃性（可选：检查最后活动时间）
-    const now = new Date()
-    const lastActivity = new Date(adminSession.lastActivity || adminSession.loginTime)
-    const inactiveDuration = now - lastActivity
-    const maxInactivity = 24 * 60 * 60 * 1000 // 24小时
-
-    if (inactiveDuration > maxInactivity) {
-      logger.security(
-        `🔒 Expired admin session for ${adminSession.username} from ${req.ip || 'unknown'}`
-      )
-      await redis.deleteSession(token) // 清理过期会话
+    const account = adminService.validateSession(adminSession)
+    if (!account) {
+      await redis.deleteSession(token)
       return res.status(401).json({
-        error: 'Session expired',
-        message: 'Admin session has expired due to inactivity'
+        error: 'Invalid admin session',
+        message:
+          'Admin account changed, was disabled, or the session expired. Please sign in again.'
       })
     }
+
+    const now = new Date()
 
     // 更新最后活动时间（异步，不阻塞请求）
     redis
@@ -1445,9 +1442,13 @@ const authenticateAdmin = async (req, res, next) => {
 
     // 设置管理员信息（只包含必要信息）
     req.admin = {
-      username: adminSession.username,
+      id: account.id,
+      username: account.username,
+      isPrimary: account.id === 'primary',
+      credentialsVersion: account.credentialsVersion,
       sessionId: token,
-      loginTime: adminSession.loginTime
+      loginTime: adminSession.loginTime,
+      lastActivity: now.toISOString()
     }
 
     const authDuration = Date.now() - startTime
@@ -1585,9 +1586,12 @@ const authenticateUserOrAdmin = async (req, res, next) => {
             )
             await redis.deleteSession(adminToken) // 清理无效/伪造的会话
             // 不返回 401，继续尝试用户认证
-          } else {
+          } else if (adminService.validateSession(adminSession)) {
+            const account = adminService.getAccount(adminSession.adminId || 'primary')
             req.admin = {
-              username: adminSession.username,
+              id: account.id,
+              username: account.username,
+              isPrimary: account.id === 'primary',
               sessionId: adminToken,
               loginTime: adminSession.loginTime
             }
@@ -1597,6 +1601,8 @@ const authenticateUserOrAdmin = async (req, res, next) => {
             req._authInfo = `${adminSession.username} ${authDuration}ms`
             logger.security(`Admin authenticated: ${adminSession.username} in ${authDuration}ms`)
             return next()
+          } else {
+            await redis.deleteSession(adminToken)
           }
         }
       } catch (error) {

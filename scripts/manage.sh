@@ -376,6 +376,48 @@ persist_install_path() {
     return 0
 }
 
+# Forks build from their checkout so an old web-dist branch cannot hide local features.
+is_upstream_repository() {
+    local repo_url
+    repo_url=$(git remote get-url origin) || return 1
+    repo_url=$(printf '%s' "${repo_url%.git}" | tr '[:upper:]' '[:lower:]')
+    case "$repo_url" in
+        https://github.com/wei-shaw/claude-relay-service|http://github.com/wei-shaw/claude-relay-service|git@github.com:wei-shaw/claude-relay-service|ssh://git@github.com/wei-shaw/claude-relay-service)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+build_frontend_from_source() {
+    if [ ! -f web/admin-spa/package.json ]; then
+        print_error "无法找到前端项目文件"
+        return 1
+    fi
+
+    local build_dir
+    build_dir=$(mktemp -d) || return 1
+    print_info "从当前代码构建前端..."
+    # Keep the served UI intact until the replacement build has succeeded.
+    if ! (cd web/admin-spa && npm ci --include=dev && npm run build -- --outDir "$build_dir" --emptyOutDir); then
+        print_error "前端构建失败，保留现有前端文件"
+        rm -rf "$build_dir"
+        return 1
+    fi
+    if [ ! -s "$build_dir/index.html" ]; then
+        print_error "前端构建未生成 index.html"
+        rm -rf "$build_dir"
+        return 1
+    fi
+    if ! { mkdir -p web/admin-spa/dist && cp -R "$build_dir/." web/admin-spa/dist/; }; then
+        print_error "复制前端构建文件失败"
+        rm -rf "$build_dir"
+        return 1
+    fi
+    rm -rf "$build_dir" || return 1
+    print_success "前端本地构建完成"
+}
+
 # 安装服务
 install_service() {
     print_info "开始安装 Claude Relay Service..."
@@ -432,7 +474,10 @@ install_service() {
     
     # 安装npm依赖
     print_info "安装项目依赖..."
-    npm install
+    if ! npm install; then
+        print_error "安装项目依赖失败"
+        return 1
+    fi
     
     # 确保脚本有执行权限（仅在权限不正确时设置）
     if [ -f "$APP_DIR/scripts/manage.sh" ] && [ ! -x "$APP_DIR/scripts/manage.sh" ]; then
@@ -480,20 +525,22 @@ EOF
     mkdir -p web/admin-spa/dist
     
     # 从 web-dist 分支获取构建好的文件
-    if git ls-remote --heads origin web-dist | grep -q web-dist; then
+    if ! is_upstream_repository; then
+        build_frontend_from_source || return 1
+    elif git ls-remote --heads origin web-dist | grep -q web-dist; then
         print_info "从 web-dist 分支下载前端文件..."
         
         # 创建临时目录用于 clone
         TEMP_CLONE_DIR=$(mktemp -d)
         
         # 使用 sparse-checkout 来只获取需要的文件
-        git clone --depth 1 --branch web-dist --single-branch \
-            https://github.com/Wei-Shaw/claude-relay-service.git \
-            "$TEMP_CLONE_DIR" 2>/dev/null || {
-            # 如果 HTTPS 失败，尝试使用当前仓库的 remote URL
-            REPO_URL=$(git config --get remote.origin.url)
-            git clone --depth 1 --branch web-dist --single-branch "$REPO_URL" "$TEMP_CLONE_DIR"
-        }
+        local repo_url
+        repo_url=$(git remote get-url origin) || return 1
+        if ! git clone --depth 1 --branch web-dist --single-branch "$repo_url" "$TEMP_CLONE_DIR"; then
+            print_error "无法下载前端文件"
+            rm -rf "$TEMP_CLONE_DIR"
+            return 1
+        fi
         
         # 复制文件到目标目录（排除 .git 和 README.md）
         rsync -av --exclude='.git' --exclude='README.md' "$TEMP_CLONE_DIR/" web/admin-spa/dist/ 2>/dev/null || {
@@ -509,24 +556,7 @@ EOF
         print_success "前端文件下载完成"
     else
         print_warning "web-dist 分支不存在，尝试本地构建..."
-        
-        # 检查是否有 Node.js 和 npm
-        if command_exists npm; then
-            # 回退到原始构建方式
-            if [ -f "web/admin-spa/package.json" ]; then
-                print_info "开始本地构建前端..."
-                cd web/admin-spa
-                npm install
-                npm run build
-                cd ../..
-                print_success "前端本地构建完成"
-            else
-                print_error "无法找到前端项目文件"
-            fi
-        else
-            print_error "无法获取前端文件，且本地环境不支持构建"
-            print_info "请确保仓库已正确配置 web-dist 分支"
-        fi
+        build_frontend_from_source || return 1
     fi
     
     # 创建软链接
@@ -573,84 +603,49 @@ update_service() {
     
     cd "$APP_DIR"
     
-    # 保存当前运行状态
-    local was_running=false
-    if pgrep -f "node.*src/app.js" > /dev/null; then
-        was_running=true
-        print_info "检测到服务正在运行，将在更新后自动重启..."
-        stop_service
-    fi
-    
-    # 备份配置文件（只备份.env，config.js可从example恢复）
-    print_info "备份配置文件..."
-    if [ -f ".env" ]; then
-        cp .env .env.backup.$(date +%Y%m%d%H%M%S)
-    fi
-    
-    # 检查本地修改
+    # Refuse to overwrite tracked edits or unpublished commits.
     print_info "检查本地文件修改..."
-    local has_changes=false
-    if git status --porcelain | grep -v "^??" | grep -q .; then
-        has_changes=true
-        print_warning "检测到本地文件已修改："
-        git status --short | grep -v "^??"
-        echo ""
-        echo -e "${YELLOW}警告：更新将使用远程版本覆盖本地修改！${NC}"
-        
-        # 创建本地修改的备份
-        local backup_branch="backup-$(date +%Y%m%d-%H%M%S)"
-        print_info "创建本地修改备份分支: $backup_branch"
-        git stash push -m "Backup before update $(date +%Y-%m-%d)" >/dev/null 2>&1
-        git branch "$backup_branch" 2>/dev/null || true
-        
-        echo -e "${GREEN}已创建备份分支: $backup_branch${NC}"
-        echo "如需恢复，可执行: git checkout $backup_branch"
-        echo ""
-        
-        echo -n "是否继续更新？(y/N): "
-        read -n 1 confirm_update
-        echo
-        
-        if [[ ! "$confirm_update" =~ ^[Yy]$ ]]; then
-            print_info "已取消更新"
-            # 恢复 stash 的修改
-            git stash pop >/dev/null 2>&1 || true
-            # 如果之前在运行，重新启动服务
-            if [ "$was_running" = true ]; then
-                print_info "重新启动服务..."
-                start_service
-            fi
-            return 0
-        fi
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        print_error "检测到本地修改，请先提交或自行备份后再更新"
+        git status --short
+        return 1
     fi
-    
-    # 获取最新代码（强制使用远程版本）
+
     print_info "获取最新代码..."
-    
-    # 先获取远程更新
     if ! git fetch origin main; then
         print_error "获取远程代码失败，请检查网络连接"
         return 1
     fi
-    
-    # 强制重置到远程版本
-    print_info "应用远程更新..."
-    if ! git reset --hard origin/main; then
-        print_error "重置到远程版本失败"
-        # 尝试恢复
-        print_info "尝试恢复..."
-        git reset --hard HEAD
+    if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
+        print_error "本地提交与 origin/main 不一致，请先合并并推送到自己的仓库"
         return 1
     fi
-    
-    # 清理未跟踪的文件（可选，保留用户新建的文件）
-    # git clean -fd  # 注释掉，避免删除用户的新文件
-    
+
+    local was_running=false
+    if pgrep -f "node.*src/app.js" > /dev/null; then
+        was_running=true
+        print_info "检测到服务正在运行，准备完成后将自动重启..."
+    fi
+
+    print_info "备份配置文件..."
+    if [ -f ".env" ] && ! cp .env ".env.backup.$(date +%Y%m%d%H%M%S)"; then
+        print_error "备份配置文件失败"
+        return 1
+    fi
+
+    print_info "应用远程更新..."
+    if ! git merge --ff-only FETCH_HEAD; then
+        print_error "无法快进更新，保留本地文件"
+        return 1
+    fi
     print_success "代码已更新到最新版本"
     
     # 更新依赖
     print_info "更新依赖..."
-    npm install
+    if ! npm ci --omit=dev; then
+        print_error "更新依赖失败，未重启服务"
+        return 1
+    fi
     
     # 确保脚本有执行权限（仅在权限不正确时设置）
     if [ -f "$APP_DIR/scripts/manage.sh" ] && [ ! -x "$APP_DIR/scripts/manage.sh" ]; then
@@ -663,17 +658,10 @@ update_service() {
     # 创建目标目录
     mkdir -p web/admin-spa/dist
     
-    # 清理旧的前端文件（保留用户自定义文件）
-    if [ -d "web/admin-spa/dist" ]; then
-        print_info "清理旧的前端文件..."
-        # 只删除已知的前端文件，保留用户可能添加的自定义文件
-        rm -rf web/admin-spa/dist/assets 2>/dev/null
-        rm -f web/admin-spa/dist/index.html 2>/dev/null
-        rm -f web/admin-spa/dist/favicon.ico 2>/dev/null
-    fi
-    
     # 从 web-dist 分支获取构建好的文件
-    if git ls-remote --heads origin web-dist | grep -q web-dist; then
+    if ! is_upstream_repository; then
+        build_frontend_from_source || return 1
+    elif git ls-remote --heads origin web-dist | grep -q web-dist; then
         print_info "从 web-dist 分支下载最新前端文件..."
         
         # 创建临时目录用于 clone
@@ -687,19 +675,14 @@ update_service() {
         
         # 使用 sparse-checkout 来只获取需要的文件，添加重试机制
         local clone_success=false
+        local repo_url
+        repo_url=$(git remote get-url origin) || return 1
         for attempt in 1 2 3; do
             print_info "尝试下载前端文件 (第 $attempt 次)..."
             
             if git clone --depth 1 --branch web-dist --single-branch \
-                https://github.com/Wei-Shaw/claude-relay-service.git \
+                "$repo_url" \
                 "$TEMP_CLONE_DIR" 2>/dev/null; then
-                clone_success=true
-                break
-            fi
-            
-            # 如果 HTTPS 失败，尝试使用当前仓库的 remote URL
-            REPO_URL=$(git config --get remote.origin.url)
-            if git clone --depth 1 --branch web-dist --single-branch "$REPO_URL" "$TEMP_CLONE_DIR" 2>/dev/null; then
                 clone_success=true
                 break
             fi
@@ -730,36 +713,20 @@ update_service() {
         print_success "前端文件更新完成"
     else
         print_warning "web-dist 分支不存在，尝试本地构建..."
-        
-        # 检查是否有 Node.js 和 npm
-        if command_exists npm; then
-            # 回退到原始构建方式
-            if [ -f "web/admin-spa/package.json" ]; then
-                print_info "开始本地构建前端..."
-                cd web/admin-spa
-                npm install
-                npm run build
-                cd ../..
-                print_success "前端本地构建完成"
-            else
-                print_error "无法找到前端项目文件"
-            fi
-        else
-            print_error "无法获取前端文件，且本地环境不支持构建"
-            print_info "请确保仓库已正确配置 web-dist 分支"
-        fi
+        build_frontend_from_source || return 1
     fi
     
     # 更新软链接到最新版本
-    create_symlink
+    create_symlink || return 1
 
     # 持久化安装路径，便于后续 update/status 自动识别
-    persist_install_path || true
+    persist_install_path || return 1
     
     # 如果之前在运行，则重新启动服务
     if [ "$was_running" = true ]; then
         print_info "重新启动服务..."
-        start_service
+        stop_service || return 1
+        start_service || return 1
     fi
     
     print_success "更新完成！"
@@ -786,7 +753,7 @@ update_service() {
     # 提醒用户检查配置
     echo -e "\n${YELLOW}提示：${NC}"
     echo "  - 配置文件已自动备份"
-    echo "  - 如有本地修改已保存到备份分支"
+    echo "  - 本地修改和未推送的提交不会被覆盖"
     echo "  - 建议检查 .env 和 config/config.js 配置"
     
     echo -e "\n${BLUE}==================${NC}"
@@ -1195,7 +1162,10 @@ switch_branch() {
     # 更新依赖（如果package.json有变化）
     if git diff "$current_branch..$target_branch" --name-only | grep -q "package.json"; then
         print_info "检测到 package.json 变化，更新依赖..."
-        npm install
+        if ! npm install; then
+            print_error "更新依赖失败"
+            return 1
+        fi
     fi
     
     # 更新前端文件（如果切换到不同版本）
@@ -1205,21 +1175,19 @@ switch_branch() {
         # 创建目标目录
         mkdir -p web/admin-spa/dist
         
-        # 清理旧的前端文件
-        if [ -d "web/admin-spa/dist" ]; then
-            rm -rf web/admin-spa/dist/* 2>/dev/null || true
-        fi
-        
         # 尝试从对应的 web-dist 分支获取前端文件
-        if git ls-remote --heads origin "web-dist-$target_branch" | grep -q "web-dist-$target_branch"; then
+        local web_branch=""
+        if ! is_upstream_repository; then
+            build_frontend_from_source || return 1
+        elif git ls-remote --heads origin "web-dist-$target_branch" | grep -q "web-dist-$target_branch"; then
             print_info "从 web-dist-$target_branch 分支下载前端文件..."
-            local web_branch="web-dist-$target_branch"
+            web_branch="web-dist-$target_branch"
         elif git ls-remote --heads origin web-dist | grep -q web-dist; then
             print_info "从 web-dist 分支下载前端文件..."
-            local web_branch="web-dist"
+            web_branch="web-dist"
         else
-            print_warning "未找到预构建的前端文件"
-            web_branch=""
+            print_warning "未找到预构建的前端文件，尝试本地构建..."
+            build_frontend_from_source || return 1
         fi
         
         if [ -n "$web_branch" ]; then
@@ -1227,8 +1195,10 @@ switch_branch() {
             TEMP_CLONE_DIR=$(mktemp -d)
             
             # 下载前端文件
+            local repo_url
+            repo_url=$(git remote get-url origin) || return 1
             if git clone --depth 1 --branch "$web_branch" --single-branch \
-                https://github.com/Wei-Shaw/claude-relay-service.git \
+                "$repo_url" \
                 "$TEMP_CLONE_DIR" 2>/dev/null; then
                 
                 # 复制文件到目标目录
@@ -1240,7 +1210,9 @@ switch_branch() {
                 
                 print_success "前端文件更新完成"
             else
-                print_warning "下载前端文件失败"
+                print_error "下载前端文件失败"
+                rm -rf "$TEMP_CLONE_DIR"
+                return 1
             fi
             
             # 清理临时目录

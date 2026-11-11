@@ -4,11 +4,11 @@ const helmet = require('helmet')
 const compression = require('compression')
 const path = require('path')
 const fs = require('fs')
-const bcrypt = require('bcryptjs')
 
 const config = require('../config/config')
 const logger = require('./utils/logger')
 const redis = require('./models/redis')
+const adminService = require('./services/adminService')
 const pricingService = require('./services/pricingService')
 const cacheMonitor = require('./utils/cacheMonitor')
 const { getSafeMessage } = require('./utils/errorSanitizer')
@@ -483,23 +483,7 @@ class Application {
         return
       }
 
-      // 从 init.json 读取管理员凭据（作为唯一真实数据源）
-      const initData = JSON.parse(fs.readFileSync(initFilePath, 'utf8'))
-
-      // 将明文密码哈希化
-      const saltRounds = 10
-      const passwordHash = await bcrypt.hash(initData.adminPassword, saltRounds)
-
-      // 存储到Redis（每次启动都覆盖，确保与 init.json 同步）
-      const adminCredentials = {
-        username: initData.adminUsername,
-        passwordHash,
-        createdAt: initData.initializedAt || new Date().toISOString(),
-        lastLogin: null,
-        updatedAt: initData.updatedAt || null
-      }
-
-      await redis.setSession('admin_credentials', adminCredentials)
+      const adminCredentials = await adminService.initialize()
 
       logger.success('Admin credentials loaded from init.json (single source of truth)')
       logger.info(`📋 Admin username: ${adminCredentials.username}`)

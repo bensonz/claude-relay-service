@@ -1,0 +1,7 @@
+- [x] Original admin login remains valid.
+- [x] Added admin passwords are hashed and never returned by APIs.
+- [x] Account changes revoke affected sessions, including refresh and mixed user/admin routes.
+- [x] Original admin and self-disable protections work.
+- [x] Desktop/mobile UI builds and matches current styles.
+- [x] Fork updater uses matching frontend source.
+- [ ] Tests, lint, formatting, and diff review recorded.

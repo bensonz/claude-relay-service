@@ -1,0 +1,7 @@
+- [x] Inspect existing login/session handling and fork updater.
+- [x] Implement local admin service and authenticated account APIs.
+- [x] Test account isolation, legacy login, and session revocation.
+- [x] Add account management to Settings.
+- [x] Correct fork frontend update source.
+- [ ] Merge the deployed v1.1.315 revision and publish to fork main (user authorized).
+- [ ] Validate and document deployment.

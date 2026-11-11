@@ -213,6 +213,33 @@ Browser visit: `http://your-server-IP:3000/web`
 
 Default admin account: Look in data/init.json
 
+#### Share the admin panel
+
+Sign in with the original admin account, then open **Settings > Admin accounts**
+(**系统设置 > 管理员账户**) and choose **Add admin**. Each person gets a separate
+username and password and signs in at `/admin-next/login`. LDAP is not required.
+
+All local admins have full panel access. You can reset another added admin's
+password or disable/re-enable their account from this page. Password resets and
+disabling an account revoke its existing sessions. Use the account menu to change
+your own credentials. The original admin cannot be disabled or reset by another
+admin; `npm run cli admin` remains the recovery command for that account.
+
+Added account passwords are stored as bcrypt hashes in `data/init.json`. Back up
+that file along with Redis; the Redis export commands do not include local admin
+accounts. The original account keeps its existing setup format. Account edits are
+intended for one CRS process per data directory.
+
+For a fork, the updated `crs update` builds the frontend from the checked-out code,
+so an upstream or stale `web-dist` build cannot hide these controls. It refuses to
+overwrite tracked edits or unpublished/divergent commits. Before switching an
+existing upstream installation to a fork, merge at least its deployed revision
+into the fork. For the first update, fetch the new code with `git pull --ff-only`
+and invoke the updated `scripts/manage.sh`; an already-running old updater keeps
+using its old frontend download behavior. The update runs in place and does not
+provide automatic backend rollback. Run it in a detached VM job if your client
+connection depends on CRS.
+
 ### 2. Add Claude Account
 
 This step is quite important, requires OAuth authorization:
