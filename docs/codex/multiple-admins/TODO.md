@@ -3,6 +3,6 @@
 - [x] Test account isolation, legacy login, and session revocation.
 - [x] Add account management to Settings.
 - [x] Correct fork frontend update source.
-- [ ] Merge the deployed v1.1.315 revision and publish to fork main (user authorized).
-- [ ] Validate and document deployment.
-- [ ] Deploy the fork and create/verify the requested melson account.
+- [x] Merge the deployed v1.1.315 revision and publish to fork main (user authorized).
+- [x] Validate and document deployment.
+- [x] Deploy the fork and create/verify the requested melson account.

@@ -4,4 +4,5 @@
 - [x] Original admin and self-disable protections work.
 - [x] Desktop/mobile UI builds and matches current styles.
 - [x] Fork updater uses matching frontend source.
-- [ ] Tests, lint, formatting, and diff review recorded.
+- [x] Tests, lint, formatting, and diff review recorded.
+- [x] Deployed fork, healthy service, original/new login, and protected admin API verified.
